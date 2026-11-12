@@ -913,44 +913,74 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
 
 @dp.message(SuggestionForm.waiting_for_nickname)
 async def suggestion_nickname(message: Message, state: FSMContext):
-    raw_text = (message.text or "").strip()
+    raw_text = (message.text or message.caption or "").strip()
     if not raw_text:
-        await message.answer(
-            "Отправьте никнейм или заполните всю форму одним сообщением."
-        )
+        await message.answer("Отправьте никнейм или заполните всю форму одним сообщением.")
         return
 
-    # Поддерживаем оба варианта:
-    # 1) заполнить форму одним сообщением (1. ник / 2. предложение / 3. вложения)
-    # 2) отвечать на вопросы бота по очереди.
-    parts = re.split(r"(?m)^\\s*[123][.)]\\s*", raw_text)
-    parts = [part.strip() for part in parts if part.strip()]
+    # Поддерживаем заполнение целиком:
+    # 1.h1zEr
+    # 2.Текст предложения
+    # 3.Фото/видео (если имеются)
+    # Маркеры распознаются и при обычных переносах строк, и если
+    # клиент/копирование добавили обратный слеш перед переносом.
+    matches = list(re.finditer(r"(?<!\w)([123])[.)]\s*", raw_text))
+    fields = {}
+    if matches and matches[0].group(1) == "1":
+        for index, match in enumerate(matches):
+            number = int(match.group(1))
+            value_start = match.end()
+            value_end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
+            fields[number] = raw_text[value_start:value_end].strip(" \t\r\n\\")
 
-    if len(parts) >= 2:
-        nickname, proposal = parts[0], parts[1]
+    if 1 in fields and 2 in fields:
+        nickname = fields[1].strip()
+        proposal = fields[2].strip()
+        extra = fields.get(3, "").strip()
+
+        if not nickname or not proposal:
+            await message.answer("Заполните пункты 1 и 2: никнейм и суть предложения.")
+            return
         if len(nickname) > 100 or len(proposal) > 3500:
             await message.answer(
                 "Проверьте форму: никнейм — до 100 символов, "
                 "предложение — до 3500 символов."
             )
             return
+
+        if extra and extra.lower() not in {
+            "нет", "пропустить", "фото/видео", "фото", "видео",
+            "если имеются", "если имеются."
+        }:
+            proposal += "\n\nДополнение к пункту 3: " + extra
+
         await state.update_data(
             suggestion_nickname=nickname,
             suggestion_text=proposal
         )
-        await state.set_state(SuggestionForm.waiting_for_media)
+
+        # Вариант «всё сразу» завершаем сразу: не задаём повторных вопросов.
+        media_type = None
+        media_file_id = None
+        if message.photo:
+            media_type, media_file_id = "photo", message.photo[-1].file_id
+        elif message.video:
+            media_type, media_file_id = "video", message.video.file_id
+        elif message.document:
+            media_type, media_file_id = "document", message.document.file_id
+
+        await submit_suggestion(message, state, media_type, media_file_id)
+        return
+
+    # Вариант «по одному сообщению»: сначала только никнейм.
+    nickname = re.sub(r"^\s*1[.)]\s*", "", raw_text).strip()
+    if not nickname or len(nickname) > 100:
         await message.answer(
-            "3. Теперь прикрепите фото или видео, если они имеются.\\n"
-            "Если вложений нет, напишите «Пропустить»."
+            "Введите никнейм или отправьте всю форму сразу в формате:\n"
+            "1. Никнейм\n2. Суть предложения\n3. Фото/видео (если имеются)"
         )
         return
 
-    nickname = raw_text
-    # Если пользователь ввёл только строку «1. никнейм», убираем номер.
-    nickname = re.sub(r"^1[.)]\\s*", "", nickname).strip()
-    if not nickname or len(nickname) > 100:
-        await message.answer("Введите никнейм текстом (до 100 символов).")
-        return
     await state.update_data(suggestion_nickname=nickname)
     await state.set_state(SuggestionForm.waiting_for_text)
     await message.answer("2. Опишите суть вашего предложения:")
@@ -970,22 +1000,12 @@ async def suggestion_text(message: Message, state: FSMContext):
     )
 
 
-@dp.message(SuggestionForm.waiting_for_media)
-async def suggestion_media(message: Message, state: FSMContext):
-    media_type = None
-    media_file_id = None
-    if message.photo:
-        media_type, media_file_id = "photo", message.photo[-1].file_id
-    elif message.video:
-        media_type, media_file_id = "video", message.video.file_id
-    elif message.document:
-        media_type, media_file_id = "document", message.document.file_id
-    elif (message.text or "").strip().lower() not in {
-        "пропустить", "нет", "без фото", "без видео"
-    }:
-        await message.answer("Прикрепите фото/видео или напишите «Пропустить».")
-        return
-
+async def submit_suggestion(
+    message: Message,
+    state: FSMContext,
+    media_type: str | None = None,
+    media_file_id: str | None = None
+):
     data = await state.get_data()
     user = message.from_user
     username = f"@{user.username}" if user.username else user.full_name
@@ -1004,8 +1024,6 @@ async def suggestion_media(message: Message, state: FSMContext):
         ))
         suggestion_id = cursor.lastrowid
 
-    # Telegram разрешает боту писать только пользователям,
-    # которые ранее сами открывали диалог с ботом.
     admin_ids = set(get_registered_admin_ids())
     admin_ids.add(OWNER_ID)
 
@@ -1036,7 +1054,11 @@ async def suggestion_media(message: Message, state: FSMContext):
                 await bot.send_document(admin_id, media_file_id)
             delivered += 1
         except TelegramAPIError:
-            logger.warning("Не удалось уведомить администратора %s", admin_id, exc_info=True)
+            logger.warning(
+                "Не удалось уведомить администратора %s",
+                admin_id,
+                exc_info=True
+            )
 
     await state.clear()
     result = (
@@ -1048,6 +1070,25 @@ async def suggestion_media(message: Message, state: FSMContext):
         result += "\n\n⚠️ Заявка сохранена, но уведомления администраторам не доставлены."
     await message.answer(result)
     await show_main_menu(message)
+
+
+@dp.message(SuggestionForm.waiting_for_media)
+async def suggestion_media(message: Message, state: FSMContext):
+    media_type = None
+    media_file_id = None
+    if message.photo:
+        media_type, media_file_id = "photo", message.photo[-1].file_id
+    elif message.video:
+        media_type, media_file_id = "video", message.video.file_id
+    elif message.document:
+        media_type, media_file_id = "document", message.document.file_id
+    elif (message.text or "").strip().lower() not in {
+        "пропустить", "нет", "без фото", "без видео"
+    }:
+        await message.answer("Прикрепите фото/видео или напишите «Пропустить».")
+        return
+
+    await submit_suggestion(message, state, media_type, media_file_id)
 
 
 @dp.callback_query(F.data.startswith("suggestion_reply:"))
