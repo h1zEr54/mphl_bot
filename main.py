@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -8,11 +9,18 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 # ================== НАСТРОЙКИ ==================
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН"
-OWNER_ID = 123456789  # <-- ВАШ Telegram user_id, только этот человек получит жалобу
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", 0)) # Берем ID владельца из переменной Bothost
 # ===============================================
 
+if not BOT_TOKEN:
+    raise ValueError("Не найден BOT_TOKEN!")
+if not OWNER_ID:
+    raise ValueError("Не найден OWNER_ID!")
+
 WELCOME_TEXT = """
+Добро пожаловать в официальный бот лиги MPHL!
+Выбери нужный раздел на клавиатуре ниже 👇
 """
 
 BTN_CAPTAINS = "Капитаны и их команды"
@@ -29,10 +37,10 @@ dp = Dispatcher()
 
 # ---------- Состояния формы жалобы ----------
 class ComplaintForm(StatesGroup):
-    nickname = State()        # 1. Ваш никнейм
-    admin_nickname = State()  # 2. Никнейм администратора
-    violation = State()       # 3. Что нарушил
-    proof = State()           # 4. Доказательство
+    nickname = State()
+    admin_nickname = State()
+    violation = State()
+    proof = State()
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -107,20 +115,22 @@ async def process_proof(message: Message, state: FSMContext):
     await state.clear()
 
     # Собираем текст жалобы
+    proof_text = message.text if message.text else "(Отправлено фото/файл)"
+    
     complaint_text = (
         "🔔 <b>НОВАЯ ЖАЛОБА НА АДМИНИСТРАЦИЮ</b>\n\n"
         f"<b>1. Никнейм заявителя:</b> {data['nickname']}\n"
         f"<b>2. Никнейм администратора:</b> {data['admin_nickname']}\n"
         f"<b>3. Что нарушил:</b> {data['violation']}\n"
-        f"<b>4. Доказательство:</b> {message.text or '(фото/файл)'}\n\n"
+        f"<b>4. Доказательство:</b> {proof_text}\n\n"
         f"<i>Отправитель: @{message.from_user.username or message.from_user.id}</i>"
     )
 
     # Отправляем ТОЛЬКО владельцу
     try:
         await bot.send_message(OWNER_ID, complaint_text, parse_mode="HTML")
-        # Если пользователь отправил фото — пересылаем и его
-        if message.photo:
+        # Если пользователь отправил фото/файл — пересылаем его владельцу
+        if message.photo or message.document:
             await message.forward(OWNER_ID)
     except Exception as e:
         logging.error(f"Не удалось отправить жалобу владельцу: {e}")
@@ -160,6 +170,7 @@ async def on_results(message: Message):
 
 
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
