@@ -976,7 +976,8 @@ async def suggestion_nickname(message: Message, state: FSMContext):
             suggestion_text=proposal
         )
 
-        # Вариант «всё сразу» завершаем сразу: не задаём повторных вопросов.
+        # Если форма пришла с медиа в подписи — пересылаем исходное сообщение.
+        # Если пришёл только текст формы, ждём вложения или явный пропуск.
         media_type = None
         media_file_id = None
         if message.photo:
@@ -986,14 +987,44 @@ async def suggestion_nickname(message: Message, state: FSMContext):
         elif message.document:
             media_type, media_file_id = "document", message.document.file_id
 
-        media_refs = (
-            [(message.chat.id, message.message_id)]
-            if media_type else []
-        )
-        await submit_suggestion(
-            message, state, media_type, media_file_id,
-            media_refs=media_refs
-        )
+        no_media = extra.lower().strip(" .") in {
+            "нет", "пропустить", "без фото", "без видео", "не имеются",
+            "не требуется", "отсутствуют"
+        }
+
+        if media_type and message.media_group_id:
+            # Альбом Telegram приходит несколькими update: подпись с формой
+            # обычно есть только у первого элемента. Не отправляем заявку сразу.
+            # Сохраняем первое сообщение, переключаем FSM на сбор остальных
+            # элементов альбома и завершаем заявку после короткой паузы.
+            await state.update_data(
+                suggestion_media_items=[(media_type, media_file_id)],
+                suggestion_media_refs=[(message.chat.id, message.message_id)],
+                suggestion_album_group_id=message.media_group_id
+            )
+            await state.set_state(SuggestionForm.waiting_for_media)
+            asyncio.create_task(_submit_captioned_album(message, state))
+        elif media_type:
+            await submit_suggestion(
+                message,
+                state,
+                media_type,
+                media_file_id,
+                media_refs=[(message.chat.id, message.message_id)]
+            )
+        elif no_media:
+            await submit_suggestion(message, state)
+        else:
+            await state.set_state(SuggestionForm.waiting_for_media)
+            await state.update_data(
+                suggestion_media_items=[],
+                suggestion_media_refs=[]
+            )
+            await message.answer(
+                "✅ Данные формы приняты. Теперь отправьте фотографии/видео "
+                "отдельными сообщениями (можно несколько).\\n"
+                "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
+            )
         return
 
     # Вариант «по одному сообщению»: сначала только никнейм.
@@ -1079,17 +1110,30 @@ async def submit_suggestion(
     for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, admin_text, reply_markup=keyboard)
+            delivered += 1
+            # Пересылаем именно оригинальные сообщения Telegram — без скачивания
+            # файлов и повторной загрузки их ботом.
             if media_refs:
-                # Пересылаем оригинальные сообщения пользователя через Telegram.
                 grouped_refs = {}
                 for source_chat_id, message_id in media_refs:
                     grouped_refs.setdefault(source_chat_id, []).append(message_id)
+
+                forward_many = getattr(bot, "forward_messages", None)
                 for source_chat_id, message_ids in grouped_refs.items():
-                    await bot.forward_messages(
-                        chat_id=admin_id,
-                        from_chat_id=source_chat_id,
-                        message_ids=message_ids
-                    )
+                    if callable(forward_many):
+                        await forward_many(
+                            chat_id=admin_id,
+                            from_chat_id=source_chat_id,
+                            message_ids=message_ids
+                        )
+                    else:
+                        # Совместимость со старыми версиями aiogram.
+                        for message_id in message_ids:
+                            await bot.forward_message(
+                                chat_id=admin_id,
+                                from_chat_id=source_chat_id,
+                                message_id=message_id
+                            )
             elif media_items:
                 # Совместимость с заявками, у которых есть только file_id.
                 album = []
@@ -1118,7 +1162,6 @@ async def submit_suggestion(
                 await bot.send_video(admin_id, media_file_id)
             elif media_type == "document":
                 await bot.send_document(admin_id, media_file_id)
-            delivered += 1
         except TelegramAPIError:
             logger.warning(
                 "Не удалось уведомить администратора %s",
@@ -1155,6 +1198,28 @@ async def _finish_suggestion_album(key, message: Message, state: FSMContext):
     )
 
 
+async def _submit_captioned_album(first_message: Message, state: FSMContext):
+    """Подождать остальные update альбома и переслать все исходные сообщения."""
+    await asyncio.sleep(2.0)
+    data = await state.get_data()
+    refs = data.get("suggestion_media_refs", [])
+    if not refs:
+        return
+    items = data.get("suggestion_media_items", [])
+    first_kind, first_file_id = items[0] if items else (None, None)
+    await submit_suggestion(
+        first_message,
+        state,
+        media_type=first_kind,
+        media_file_id=first_file_id,
+        media_items=items,
+        media_refs=refs
+    )
+
+
+_suggestion_user_locks = {}
+
+
 @dp.message(SuggestionForm.waiting_for_media)
 async def suggestion_media(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -1171,17 +1236,22 @@ async def suggestion_media(message: Message, state: FSMContext):
         media_type, media_file_id = "document", message.document.file_id
 
     if media_type:
-        # Не завершаем заявку после первого вложения:
-        # пользователь может присылать файлы отдельными сообщениями.
-        media_items.append((media_type, media_file_id))
-        media_refs = list(data.get("suggestion_media_refs", []))
-        media_refs.append((message.chat.id, message.message_id))
-        await state.update_data(
-            suggestion_media_items=media_items,
-            suggestion_media_refs=media_refs
-        )
+        # Telegram присылает элементы альбома отдельными update почти одновременно.
+        # Блокировка не даёт двум обработчикам перезаписать список и потерять фото.
+        lock = _suggestion_user_locks.setdefault(message.from_user.id, asyncio.Lock())
+        async with lock:
+            latest = await state.get_data()
+            media_items = list(latest.get("suggestion_media_items", []))
+            media_refs = list(latest.get("suggestion_media_refs", []))
+            media_items.append((media_type, media_file_id))
+            media_refs.append((message.chat.id, message.message_id))
+            await state.update_data(
+                suggestion_media_items=media_items,
+                suggestion_media_refs=media_refs
+            )
+            count = len(media_items)
         await message.answer(
-            f"📎 Файл добавлен ({len(media_items)}). "
+            f"📎 Файл добавлен ({count}). "
             "Можете отправить ещё или написать «Готово»."
         )
         return
