@@ -126,6 +126,15 @@ def init_db():
         """)
 
         db.execute("""
+            CREATE TABLE IF NOT EXISTS suggestion_media_refs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suggestion_id INTEGER NOT NULL,
+                source_chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL
+            )
+        """)
+
+        db.execute("""
             CREATE TABLE IF NOT EXISTS captains (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -977,7 +986,14 @@ async def suggestion_nickname(message: Message, state: FSMContext):
         elif message.document:
             media_type, media_file_id = "document", message.document.file_id
 
-        await submit_suggestion(message, state, media_type, media_file_id)
+        media_refs = (
+            [(message.chat.id, message.message_id)]
+            if media_type else []
+        )
+        await submit_suggestion(
+            message, state, media_type, media_file_id,
+            media_refs=media_refs
+        )
         return
 
     # Вариант «по одному сообщению»: сначала только никнейм.
@@ -1013,7 +1029,8 @@ async def submit_suggestion(
     state: FSMContext,
     media_type: str | None = None,
     media_file_id: str | None = None,
-    media_items: list | None = None
+    media_items: list | None = None,
+    media_refs: list | None = None
 ):
     data = await state.get_data()
     user = message.from_user
@@ -1032,6 +1049,13 @@ async def submit_suggestion(
             datetime.now().strftime("%d.%m.%Y %H:%M")
         ))
         suggestion_id = cursor.lastrowid
+        for source_chat_id, message_id in (media_refs or []):
+            db.execute(
+                """INSERT INTO suggestion_media_refs
+                   (suggestion_id, source_chat_id, message_id)
+                   VALUES (?, ?, ?)""",
+                (suggestion_id, source_chat_id, message_id)
+            )
 
     admin_ids = set(get_registered_admin_ids())
     admin_ids.add(OWNER_ID)
@@ -1055,41 +1079,39 @@ async def submit_suggestion(
     for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, admin_text, reply_markup=keyboard)
-            if media_items:
-                # Отправляем весь альбом, а не только первый файл.
+            if media_refs:
+                # Пересылаем оригинальные сообщения пользователя через Telegram.
+                grouped_refs = {}
+                for source_chat_id, message_id in media_refs:
+                    grouped_refs.setdefault(source_chat_id, []).append(message_id)
+                for source_chat_id, message_ids in grouped_refs.items():
+                    await bot.forward_messages(
+                        chat_id=admin_id,
+                        from_chat_id=source_chat_id,
+                        message_ids=message_ids
+                    )
+            elif media_items:
+                # Совместимость с заявками, у которых есть только file_id.
                 album = []
-                for item in media_items:
-                    kind, file_id = item
+                for kind, file_id in media_items:
                     if kind == "photo":
                         album.append(InputMediaPhoto(media=file_id))
                     elif kind == "video":
                         album.append(InputMediaVideo(media=file_id))
                     elif kind == "document":
                         album.append(InputMediaDocument(media=file_id))
-
-                # Telegram sendMediaGroup принимает от 2 до 10 файлов.
-                if len(album) >= 2:
-                    for offset in range(0, len(album), 10):
-                        chunk = album[offset:offset + 10]
-                        if len(chunk) == 1:
-                            item = media_items[offset]
-                            kind, file_id = item
-                            if kind == "photo":
-                                await bot.send_photo(admin_id, file_id)
-                            elif kind == "video":
-                                await bot.send_video(admin_id, file_id)
-                            else:
-                                await bot.send_document(admin_id, file_id)
+                for offset in range(0, len(album), 10):
+                    chunk = album[offset:offset + 10]
+                    if len(chunk) >= 2:
+                        await bot.send_media_group(admin_id, chunk)
+                    elif len(chunk) == 1:
+                        kind, file_id = media_items[offset]
+                        if kind == "photo":
+                            await bot.send_photo(admin_id, file_id)
+                        elif kind == "video":
+                            await bot.send_video(admin_id, file_id)
                         else:
-                            await bot.send_media_group(admin_id, chunk)
-                elif len(album) == 1:
-                    kind, file_id = media_items[0]
-                    if kind == "photo":
-                        await bot.send_photo(admin_id, file_id)
-                    elif kind == "video":
-                        await bot.send_video(admin_id, file_id)
-                    else:
-                        await bot.send_document(admin_id, file_id)
+                            await bot.send_document(admin_id, file_id)
             elif media_type == "photo":
                 await bot.send_photo(admin_id, media_file_id)
             elif media_type == "video":
@@ -1152,7 +1174,12 @@ async def suggestion_media(message: Message, state: FSMContext):
         # Не завершаем заявку после первого вложения:
         # пользователь может присылать файлы отдельными сообщениями.
         media_items.append((media_type, media_file_id))
-        await state.update_data(suggestion_media_items=media_items)
+        media_refs = list(data.get("suggestion_media_refs", []))
+        media_refs.append((message.chat.id, message.message_id))
+        await state.update_data(
+            suggestion_media_items=media_items,
+            suggestion_media_refs=media_refs
+        )
         await message.answer(
             f"📎 Файл добавлен ({len(media_items)}). "
             "Можете отправить ещё или написать «Готово»."
@@ -1172,7 +1199,8 @@ async def suggestion_media(message: Message, state: FSMContext):
             state,
             media_items=media_items,
             media_type=media_items[0][0],
-            media_file_id=media_items[0][1]
+            media_file_id=media_items[0][1],
+            media_refs=data.get("suggestion_media_refs", [])
         )
         return
 
