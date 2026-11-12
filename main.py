@@ -357,12 +357,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     register_admin_user(message.from_user.id, message.from_user.username)
 
-    # Убираем старую Reply-клавиатуру
-    await message.answer(
-        "Старая клавиатура убрана.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
+    # Сразу показываем главное меню без отдельного служебного сообщения.
     await show_main_menu(message)
 
 
@@ -918,7 +913,41 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
 
 @dp.message(SuggestionForm.waiting_for_nickname)
 async def suggestion_nickname(message: Message, state: FSMContext):
-    nickname = (message.text or "").strip()
+    raw_text = (message.text or "").strip()
+    if not raw_text:
+        await message.answer(
+            "Отправьте никнейм или заполните всю форму одним сообщением."
+        )
+        return
+
+    # Поддерживаем оба варианта:
+    # 1) заполнить форму одним сообщением (1. ник / 2. предложение / 3. вложения)
+    # 2) отвечать на вопросы бота по очереди.
+    parts = re.split(r"(?m)^\\s*[123][.)]\\s*", raw_text)
+    parts = [part.strip() for part in parts if part.strip()]
+
+    if len(parts) >= 2:
+        nickname, proposal = parts[0], parts[1]
+        if len(nickname) > 100 or len(proposal) > 3500:
+            await message.answer(
+                "Проверьте форму: никнейм — до 100 символов, "
+                "предложение — до 3500 символов."
+            )
+            return
+        await state.update_data(
+            suggestion_nickname=nickname,
+            suggestion_text=proposal
+        )
+        await state.set_state(SuggestionForm.waiting_for_media)
+        await message.answer(
+            "3. Теперь прикрепите фото или видео, если они имеются.\\n"
+            "Если вложений нет, напишите «Пропустить»."
+        )
+        return
+
+    nickname = raw_text
+    # Если пользователь ввёл только строку «1. никнейм», убираем номер.
+    nickname = re.sub(r"^1[.)]\\s*", "", nickname).strip()
     if not nickname or len(nickname) > 100:
         await message.answer("Введите никнейм текстом (до 100 символов).")
         return
