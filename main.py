@@ -1003,8 +1003,8 @@ async def suggestion_text(message: Message, state: FSMContext):
     await state.update_data(suggestion_text=text)
     await state.set_state(SuggestionForm.waiting_for_media)
     await message.answer(
-        "3. Прикрепите фото или видео, если они имеются.\n"
-        "Если вложений нет, напишите «Пропустить»."
+        "3. Отправьте все нужные фото/видео/файлы (можно несколькими сообщениями).\n"
+        "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
     )
 
 
@@ -1135,8 +1135,12 @@ async def _finish_suggestion_album(key, message: Message, state: FSMContext):
 
 @dp.message(SuggestionForm.waiting_for_media)
 async def suggestion_media(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_items = list(data.get("suggestion_media_items", []))
+
     media_type = None
     media_file_id = None
+
     if message.photo:
         media_type, media_file_id = "photo", message.photo[-1].file_id
     elif message.video:
@@ -1145,37 +1149,41 @@ async def suggestion_media(message: Message, state: FSMContext):
         media_type, media_file_id = "document", message.document.file_id
 
     if media_type:
-        # Альбом: у всех его сообщений одинаковый media_group_id.
-        if message.media_group_id:
-            key = (message.from_user.id, message.media_group_id)
-            entry = _suggestion_album_buffers.setdefault(
-                key, {"items": [], "task": None}
-            )
-            entry["items"].append((media_type, media_file_id))
-
-            old_task = entry.get("task")
-            if old_task and not old_task.done():
-                old_task.cancel()
-
-            entry["task"] = asyncio.create_task(
-                _finish_suggestion_album(key, message, state)
-            )
-            return
-
-        # Одиночное фото/видео/документ.
-        await submit_suggestion(
-            message, state, media_type, media_file_id,
-            media_items=[(media_type, media_file_id)]
+        # Не завершаем заявку после первого вложения:
+        # пользователь может присылать файлы отдельными сообщениями.
+        media_items.append((media_type, media_file_id))
+        await state.update_data(suggestion_media_items=media_items)
+        await message.answer(
+            f"📎 Файл добавлен ({len(media_items)}). "
+            "Можете отправить ещё или написать «Готово»."
         )
         return
 
-    if (message.text or "").strip().lower() in {
-        "пропустить", "нет", "без фото", "без видео"
-    }:
+    command = (message.text or "").strip().lower()
+    if command in {"готово", "гатово", "done", "завершить"}:
+        if not media_items:
+            await message.answer(
+                "Вы ещё не прикрепили файлы. Отправьте фото/видео "
+                "или напишите «Пропустить»."
+            )
+            return
+        await submit_suggestion(
+            message,
+            state,
+            media_items=media_items,
+            media_type=media_items[0][0],
+            media_file_id=media_items[0][1]
+        )
+        return
+
+    if command in {"пропустить", "нет", "без фото", "без видео"}:
         await submit_suggestion(message, state)
         return
 
-    await message.answer("Прикрепите фото/видео или напишите «Пропустить».")
+    await message.answer(
+        "Прикрепите фото, видео или документ. "
+        "Когда закончите, напишите «Готово»."
+    )
 
 
 @dp.callback_query(F.data.startswith("suggestion_reply:"))
