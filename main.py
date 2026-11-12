@@ -23,6 +23,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ReplyKeyboardRemove,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaDocument,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -53,6 +56,11 @@ bot = Bot(
 )
 
 dp = Dispatcher()
+
+# Сбор всех элементов Telegram-альбома перед отправкой администраторам.
+_suggestion_album_buffers = {}
+
+
 
 
 # =====================================================
@@ -1004,7 +1012,8 @@ async def submit_suggestion(
     message: Message,
     state: FSMContext,
     media_type: str | None = None,
-    media_file_id: str | None = None
+    media_file_id: str | None = None,
+    media_items: list | None = None
 ):
     data = await state.get_data()
     user = message.from_user
@@ -1046,7 +1055,42 @@ async def submit_suggestion(
     for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, admin_text, reply_markup=keyboard)
-            if media_type == "photo":
+            if media_items:
+                # Отправляем весь альбом, а не только первый файл.
+                album = []
+                for item in media_items:
+                    kind, file_id = item
+                    if kind == "photo":
+                        album.append(InputMediaPhoto(media=file_id))
+                    elif kind == "video":
+                        album.append(InputMediaVideo(media=file_id))
+                    elif kind == "document":
+                        album.append(InputMediaDocument(media=file_id))
+
+                # Telegram sendMediaGroup принимает от 2 до 10 файлов.
+                if len(album) >= 2:
+                    for offset in range(0, len(album), 10):
+                        chunk = album[offset:offset + 10]
+                        if len(chunk) == 1:
+                            item = media_items[offset]
+                            kind, file_id = item
+                            if kind == "photo":
+                                await bot.send_photo(admin_id, file_id)
+                            elif kind == "video":
+                                await bot.send_video(admin_id, file_id)
+                            else:
+                                await bot.send_document(admin_id, file_id)
+                        else:
+                            await bot.send_media_group(admin_id, chunk)
+                elif len(album) == 1:
+                    kind, file_id = media_items[0]
+                    if kind == "photo":
+                        await bot.send_photo(admin_id, file_id)
+                    elif kind == "video":
+                        await bot.send_video(admin_id, file_id)
+                    else:
+                        await bot.send_document(admin_id, file_id)
+            elif media_type == "photo":
                 await bot.send_photo(admin_id, media_file_id)
             elif media_type == "video":
                 await bot.send_video(admin_id, media_file_id)
@@ -1072,6 +1116,23 @@ async def submit_suggestion(
     await show_main_menu(message)
 
 
+async def _finish_suggestion_album(key, message: Message, state: FSMContext):
+    # Даём Telegram доставить все части альбома (каждый файл приходит отдельным update).
+    await asyncio.sleep(1.2)
+    entry = _suggestion_album_buffers.pop(key, None)
+    if not entry:
+        return
+    media_items = entry["items"]
+    first_kind, first_file_id = media_items[0] if media_items else (None, None)
+    await submit_suggestion(
+        message,
+        state,
+        first_kind,
+        first_file_id,
+        media_items=media_items
+    )
+
+
 @dp.message(SuggestionForm.waiting_for_media)
 async def suggestion_media(message: Message, state: FSMContext):
     media_type = None
@@ -1082,13 +1143,39 @@ async def suggestion_media(message: Message, state: FSMContext):
         media_type, media_file_id = "video", message.video.file_id
     elif message.document:
         media_type, media_file_id = "document", message.document.file_id
-    elif (message.text or "").strip().lower() not in {
-        "пропустить", "нет", "без фото", "без видео"
-    }:
-        await message.answer("Прикрепите фото/видео или напишите «Пропустить».")
+
+    if media_type:
+        # Альбом: у всех его сообщений одинаковый media_group_id.
+        if message.media_group_id:
+            key = (message.from_user.id, message.media_group_id)
+            entry = _suggestion_album_buffers.setdefault(
+                key, {"items": [], "task": None}
+            )
+            entry["items"].append((media_type, media_file_id))
+
+            old_task = entry.get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+
+            entry["task"] = asyncio.create_task(
+                _finish_suggestion_album(key, message, state)
+            )
+            return
+
+        # Одиночное фото/видео/документ.
+        await submit_suggestion(
+            message, state, media_type, media_file_id,
+            media_items=[(media_type, media_file_id)]
+        )
         return
 
-    await submit_suggestion(message, state, media_type, media_file_id)
+    if (message.text or "").strip().lower() in {
+        "пропустить", "нет", "без фото", "без видео"
+    }:
+        await submit_suggestion(message, state)
+        return
+
+    await message.answer("Прикрепите фото/видео или напишите «Пропустить».")
 
 
 @dp.callback_query(F.data.startswith("suggestion_reply:"))
