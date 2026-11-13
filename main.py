@@ -78,14 +78,22 @@ def get_db():
 
 def init_db():
     with get_db() as db:
+        # Обновляем таблицу admins (добавляем level)
         db.execute("""
             CREATE TABLE IF NOT EXISTS admins (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 position TEXT NOT NULL,
                 name TEXT NOT NULL,
-                telegram TEXT NOT NULL
+                telegram TEXT NOT NULL,
+                level TEXT NOT NULL DEFAULT 'Администрация'
             )
         """)
+        
+        # Проверка на наличие колонки level (для старых баз)
+        columns = [row["name"] for row in db.execute("PRAGMA table_info(admins)").fetchall()]
+        if "level" not in columns:
+            db.execute("ALTER TABLE admins ADD COLUMN level TEXT NOT NULL DEFAULT 'Администрация'")
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS complaints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,16 +148,19 @@ def init_db():
         count = db.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
         if count == 0:
             db.execute("""
-                INSERT INTO admins (position, name, telegram)
-                VALUES (?, ?, ?)
-            """, ("Владелец лиги", "h1zEr #99", "https://t.me/h1zEr54"))
+                INSERT INTO admins (position, name, telegram, level)
+                VALUES (?, ?, ?, ?)
+            """, ("Владелец лиги", "h1zEr #99", "https://t.me/h1zEr54", "Высшая администрация"))
 
 
 # =====================================================
-# ДОЛЖНОСТИ
+# ДОЛЖНОСТИ И УРОВНИ
 # =====================================================
+
+LEVELS = ["Высшая администрация", "Старшая администрация", "Администрация"]
 
 POSITIONS = [
+    "Владелец лиги",
     "Главный администратор",
     "Главный судья",
     "Зам.главного администратора",
@@ -270,6 +281,7 @@ class AddCaptainForm(StatesGroup):
     waiting_for_telegram = State()
 
 class AddAdminForm(StatesGroup):
+    waiting_for_level = State()
     waiting_for_position = State()
     waiting_for_name = State()
     waiting_for_link = State()
@@ -347,7 +359,7 @@ async def captains_callback(call: CallbackQuery):
 
 
 # =====================================================
-# АДМИНИСТРАЦИЯ
+# СОСТАВ АДМИНИСТРАЦИИ (ОБНОВЛЕННЫЙ СПИСОК)
 # =====================================================
 
 @dp.callback_query(F.data == "admins")
@@ -355,17 +367,42 @@ async def admins_callback(call: CallbackQuery):
     await call.answer()
     with get_db() as db:
         admins = db.execute("SELECT * FROM admins ORDER BY id").fetchall()
-    text = "👥 <b>Состав администрации MPHL</b>\n\n"
-    if not admins:
-        text += "Администрация пока не добавлена."
-    else:
-        for admin in admins:
-            text += (
-                f"▪️ <b>{escape(admin['position'])}</b>\n"
-                f"👤 {escape(admin['name'])}\n"
-                f"🔗 <a href=\"{escape(admin['telegram'])}\">Telegram</a>\n\n"
-            )
-    await call.message.edit_text(text, reply_markup=back_keyboard())
+
+    # Собираем данные в словарь для быстрого доступа: { "Должность": (ник, ссылка) }
+    admin_dict = {}
+    for admin in admins:
+        # Если на одну должность несколько людей (например, Судья), сохраняем список
+        pos = admin['position']
+        if pos not in admin_dict:
+            admin_dict[pos] = []
+        admin_dict[pos].append((admin['name'], admin['telegram']))
+
+    def fmt(pos_name):
+        """Возвращает строку для должности или 'Свободно'."""
+        if pos_name in admin_dict and admin_dict[pos_name]:
+            # Берем первого (или можно сделать список через запятую)
+            name, link = admin_dict[pos_name][0]
+            return f"{escape(name)} | {escape(link)}"
+        return "Свободно"
+
+    text = (
+        "<b>Высшая администрация</b>\n\n"
+        f"Владелец лиги - {fmt('Владелец лиги')}\n"
+        f"Главный администратор - {fmt('Главный администратор')}\n"
+        f"Главный судья - {fmt('Главный судья')}\n\n"
+        "<b>Старшая администрация</b>\n\n"
+        f"Зам.главного администратора - {fmt('Зам.главного администратора')}\n"
+        f"Зам.главного судьи - {fmt('Зам.главного судьи')}\n"
+        f"Технический специалист - {fmt('Технический специалист')}\n"
+        f"Специалист по соц сетям - {fmt('Специалист по соц сетям')}\n\n"
+        "<b>Администрация</b>\n\n"
+        f"Судья - {fmt('Судья 1')}\n"
+        f"Судья - {fmt('Судья 2')}\n"
+        f"Судья - {fmt('Судья 3')}\n\n"
+        "Подать заявку - https://t.me/infomphl/5"
+    )
+
+    await call.message.edit_text(text, reply_markup=back_keyboard(), disable_web_page_preview=True)
 
 
 # =====================================================
@@ -393,7 +430,7 @@ async def admin_panel(call: CallbackQuery):
 
 
 # =====================================================
-# РАЗБАН (ФОРМА)
+# РАЗБАН
 # =====================================================
 
 @dp.callback_query(F.data == "unban")
@@ -538,7 +575,7 @@ async def _send_unban_request(message: Message, state: FSMContext, media_items: 
 
 
 # =====================================================
-# ЖАЛОБЫ (ПОШАГОВАЯ ФОРМА)
+# ЖАЛОБЫ
 # =====================================================
 
 @dp.callback_query(F.data == "complaint")
@@ -744,7 +781,7 @@ async def complaint_decision(call: CallbackQuery):
 
 
 # =====================================================
-# ПРЕДЛОЖЕНИЯ (ПОШАГОВЫЙ ВВОД)
+# ПРЕДЛОЖЕНИЯ
 # =====================================================
 
 @dp.callback_query(F.data == "suggestion")
@@ -991,7 +1028,7 @@ async def complaint_history(call: CallbackQuery):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ
+# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ (ДОБАВЛЕНИЕ И УДАЛЕНИЕ)
 # =====================================================
 
 @dp.callback_query(F.data == "manage_admins")
@@ -1013,14 +1050,50 @@ async def add_admin_start(call: CallbackQuery, state: FSMContext):
     if not is_owner(call.from_user.id):
         await call.answer("Нет доступа.", show_alert=True)
         return
+    
+    builder = InlineKeyboardBuilder()
+    for level in LEVELS:
+        builder.button(text=level, callback_data=f"level:{level}")
+    builder.button(text="⬅️ Назад", callback_data="manage_admins")
+    builder.adjust(1)
+    
+    await state.set_state(AddAdminForm.waiting_for_level)
+    await call.answer()
+    await call.message.edit_text(
+        "➕ <b>Добавление администратора</b>\n\n"
+        "Шаг 1. Выберите уровень администратора:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(AddAdminForm.waiting_for_level, F.data.startswith("level:"))
+async def add_admin_level(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    
+    level = call.data.split(":", 1)[1]
+    if level not in LEVELS:
+        await call.answer("Некорректный уровень.")
+        return
+    
+    await state.update_data(level=level)
+    
+    # Теперь показываем доступные должности для этого уровня
+    # Но для простоты показываем все, чтобы админ сам выбрал
     builder = InlineKeyboardBuilder()
     for position in POSITIONS:
         builder.button(text=position, callback_data=f"position:{position}")
-    builder.button(text="⬅️ Назад", callback_data="manage_admins")
+    builder.button(text="⬅️ Назад", callback_data="add_admin")
     builder.adjust(1)
+    
     await state.set_state(AddAdminForm.waiting_for_position)
     await call.answer()
-    await call.message.edit_text("➕ <b>Добавление администратора</b>\n\nВыберите должность:", reply_markup=builder.as_markup())
+    await call.message.edit_text(
+        f"Уровень: <b>{level}</b>\n\n"
+        "Шаг 2. Выберите должность:",
+        reply_markup=builder.as_markup()
+    )
 
 
 @dp.callback_query(AddAdminForm.waiting_for_position, F.data.startswith("position:"))
@@ -1028,14 +1101,16 @@ async def add_admin_position(call: CallbackQuery, state: FSMContext):
     if not is_owner(call.from_user.id):
         await call.answer("Нет доступа.", show_alert=True)
         return
+    
     position = call.data.split(":", 1)[1]
     if position not in POSITIONS:
         await call.answer("Некорректная должность.")
         return
+    
     await state.update_data(position=position)
     await state.set_state(AddAdminForm.waiting_for_name)
     await call.answer()
-    await call.message.answer("Введите имя и игровой ник администратора:")
+    await call.message.answer("Шаг 3. Введите Никнейм + номер (например: h1zEr #99):")
 
 
 @dp.message(AddAdminForm.waiting_for_name)
@@ -1045,11 +1120,11 @@ async def add_admin_name(message: Message, state: FSMContext):
         return
     name = (message.text or "").strip()
     if not name or len(name) > 100:
-        await message.answer("Введите корректное имя до 100 символов.")
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
         return
     await state.update_data(name=name)
     await state.set_state(AddAdminForm.waiting_for_link)
-    await message.answer("Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>")
+    await message.answer("Шаг 4. Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>")
 
 
 @dp.message(AddAdminForm.waiting_for_link)
@@ -1061,9 +1136,18 @@ async def add_admin_link(message: Message, state: FSMContext):
     if not valid_telegram_link(link):
         await message.answer("❌ Некорректная ссылка. Используйте https://t.me/username")
         return
+    
     data = await state.get_data()
+    
     with get_db() as db:
-        db.execute("INSERT INTO admins (position, name, telegram) VALUES (?, ?, ?)", (data["position"], data["name"], link))
+        # Удаляем старого админа с этой должности (если есть), чтобы не было дублей
+        db.execute("DELETE FROM admins WHERE position = ?", (data["position"],))
+        # Добавляем нового
+        db.execute(
+            "INSERT INTO admins (position, name, telegram, level) VALUES (?, ?, ?, ?)",
+            (data["position"], data["name"], link, data["level"])
+        )
+    
     await state.clear()
     await message.answer("✅ Администратор добавлен.")
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
