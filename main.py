@@ -43,7 +43,10 @@ if not OWNER_ID or not OWNER_ID.isdigit():
 
 OWNER_ID = int(OWNER_ID)
 
-DB_PATH = Path("mphl_bot.db")
+# ВАЖНО: база данных хранится в /app/data, чтобы не удаляться при перезапуске
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "mphl_bot.db"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -142,8 +145,14 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        
-        # ТАБЛИЦА ИГР
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS suggestion_media_refs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suggestion_id INTEGER NOT NULL,
+                source_chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL
+            )
+        """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS games (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,8 +162,6 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        
-        # ТАБЛИЦА ИТОГОВ
         db.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,7 +245,7 @@ def get_registered_admin_ids():
 
 
 def valid_telegram_link(link: str):
-    return bool(re.fullmatch(r"https?://(t\.me|t\.me/[A-Za-z0-9_]+|www\.twitch\.tv/[A-Za-z0-9_]+|twitch\.tv/[A-Za-z0-9_]+|youtube\.com/.*|youtu\.be/.*)", link.strip()))
+    return bool(re.fullmatch(r"https?://(t\.me|www\.twitch\.tv|twitch\.tv|youtube\.com|youtu\.be)/[A-Za-z0-9_/]+", link.strip()))
 
 
 def main_menu_keyboard(user_id: int, username: str | None = None):
@@ -358,7 +365,7 @@ async def home_callback(call: CallbackQuery, state: FSMContext):
 
 
 # =====================================================
-# ИГРЫ (ПРОСМОТР ДЛЯ ВСЕХ)
+# ИГРЫ (ПРОСМОТР)
 # =====================================================
 
 @dp.callback_query(F.data == "games")
@@ -379,7 +386,7 @@ async def games_callback(call: CallbackQuery):
 
 
 # =====================================================
-# ИТОГИ (ПРОСМОТР ДЛЯ ВСЕХ)
+# ИТОГИ (ПРОСМОТР)
 # =====================================================
 
 @dp.callback_query(F.data == "results")
@@ -493,7 +500,7 @@ async def admin_panel(call: CallbackQuery):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ ИГРАМИ (АДМИН)
+# УПРАВЛЕНИЕ ИГРАМИ
 # =====================================================
 
 @dp.callback_query(F.data == "add_game")
@@ -593,7 +600,7 @@ async def delete_game_match(message: Message, state: FSMContext):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ ИТОГАМИ (АДМИН)
+# УПРАВЛЕНИЕ ИТОГАМИ
 # =====================================================
 
 @dp.callback_query(F.data == "add_result")
