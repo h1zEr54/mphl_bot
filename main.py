@@ -135,7 +135,6 @@ def init_db():
             )
         """)
 
-        # Добавление владельца по умолчанию
         count = db.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
         if count == 0:
             db.execute("""
@@ -584,18 +583,15 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
         "Для отмены напишите /cancel."
     )
 
-
 @dp.message(SuggestionForm.waiting_for_nickname)
 async def suggestion_nickname(message: Message, state: FSMContext):
     nickname = (message.text or "").strip()
     if not nickname or len(nickname) > 100:
         await message.answer("❌ Введите корректный никнейм (до 100 символов).")
         return
-    
     await state.update_data(suggestion_nickname=nickname)
     await state.set_state(SuggestionForm.waiting_for_text)
     await message.answer("Шаг 2. Опишите суть вашего предложения (до 3500 символов):")
-
 
 @dp.message(SuggestionForm.waiting_for_text)
 async def suggestion_text(message: Message, state: FSMContext):
@@ -603,14 +599,12 @@ async def suggestion_text(message: Message, state: FSMContext):
     if not text or len(text) > 3500:
         await message.answer("❌ Отправьте текст предложения (до 3500 символов).")
         return
-    
     await state.update_data(suggestion_text=text)
     await state.set_state(SuggestionForm.waiting_for_media)
     await message.answer(
         "Шаг 3. Прикрепите фото/видео/документы (если есть).\n"
         "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
     )
-
 
 @dp.message(SuggestionForm.waiting_for_media)
 async def suggestion_media(message: Message, state: FSMContext):
@@ -734,6 +728,10 @@ async def submit_suggestion(message: Message, state: FSMContext, media_items: li
     await show_main_menu(message)
 
 
+# =====================================================
+# ОТВЕТ НА ПРЕДЛОЖЕНИЕ
+# =====================================================
+
 @dp.callback_query(F.data.startswith("suggestion_reply:"))
 async def suggestion_reply_start(call: CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id, call.from_user.username):
@@ -755,7 +753,6 @@ async def suggestion_reply_start(call: CallbackQuery, state: FSMContext):
     await state.update_data(suggestion_id=suggestion_id, suggestion_user_id=suggestion["user_id"])
     await call.answer()
     await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel.")
-
 
 @dp.message(SuggestionReplyForm.waiting_for_reply)
 async def suggestion_reply_send(message: Message, state: FSMContext):
@@ -791,7 +788,7 @@ async def suggestion_reply_send(message: Message, state: FSMContext):
 
 
 # =====================================================
-# ЖАЛОБЫ (С ПОДДЕРЖКОЙ АЛЬБОМОВ)
+# ЖАЛОБЫ
 # =====================================================
 
 @dp.callback_query(F.data == "complaint")
@@ -843,4 +840,255 @@ async def _process_complaint_album(group_id: str, state: FSMContext):
     buffer = _complaint_album_buffers.pop(group_id, None)
     if not buffer:
         return
-   
+    messages = buffer["messages"]
+    text = buffer["text"]
+    user = buffer["user"]
+    photos = [m for m in messages if m.photo or m.document]
+    
+    await _send_complaint_to_owner(messages[0], text, user, photos)
+    
+    await state.clear()
+    await messages[0].answer(
+        "✅ <b>Жалоба успешно отправлена!</b>\n\n"
+        "Администрация рассмотрит её в ближайшее время."
+    )
+    await show_main_menu(messages[0])
+
+async def _send_complaint_to_owner(message: Message, text: str, user, photos: list):
+    username = f"@{user.username}" if user.username else user.full_name
+    with get_db() as db:
+        cursor = db.execute("""
+            INSERT INTO complaints (user_id, username, text, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user.id, username, text, "pending", datetime.now().strftime("%d.%m.%Y %H:%M")))
+        complaint_id = cursor.lastrowid
+
+    admin_text = (
+        "⚠️ <b>Новая жалоба!</b>\n\n"
+        f"🆔 Номер: <code>{complaint_id}</code>\n"
+        f"👤 Отправитель: {escape(username)}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
+        f"📝 Жалоба:\n{escape(text)}"
+    )
+
+    try:
+        await bot.send_message(
+            OWNER_ID,
+            admin_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"complaint:approve:{complaint_id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"complaint:reject:{complaint_id}")
+                ]
+            ])
+        )
+        for msg in photos:
+            await msg.copy_to(OWNER_ID)
+    except TelegramAPIError:
+        logger.exception("Ошибка отправки жалобы владельцу")
+
+
+@dp.callback_query(F.data.startswith("complaint:"))
+async def complaint_decision(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        _, action, complaint_id = call.data.split(":")
+        complaint_id = int(complaint_id)
+    except (ValueError, AttributeError):
+        await call.answer("Некорректный запрос.")
+        return
+    if action == "approve":
+        status = "approved"
+        result = "одобрена"
+    elif action == "reject":
+        status = "rejected"
+        result = "отклонена"
+    else:
+        await call.answer("Неизвестное действие.")
+        return
+    with get_db() as db:
+        cursor = db.execute("""
+            UPDATE complaints SET status = ? WHERE id = ? AND status = 'pending'
+        """, (status, complaint_id))
+        complaint = db.execute("SELECT user_id FROM complaints WHERE id = ?", (complaint_id,)).fetchone()
+    if cursor.rowcount == 0:
+        await call.answer("Жалоба уже обработана или не найдена.", show_alert=True)
+        return
+    await call.answer("Статус обновлён.")
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.")
+    except TelegramAPIError:
+        logger.exception("Не удалось обновить сообщение жалобы")
+    if complaint:
+        try:
+            await bot.send_message(complaint["user_id"], f"📋 Ваша жалоба №{complaint_id} {result}.")
+        except TelegramAPIError:
+            logger.exception("Не удалось уведомить автора жалобы")
+
+
+# =====================================================
+# ИСТОРИЯ ЖАЛОБ
+# =====================================================
+
+@dp.callback_query(F.data == "complaint_history")
+async def complaint_history(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await call.answer()
+    with get_db() as db:
+        complaints = db.execute("SELECT * FROM complaints ORDER BY id DESC LIMIT 10").fetchall()
+    text = "📋 <b>Последние жалобы</b>\n\n"
+    if not complaints:
+        text += "Жалоб пока нет."
+    else:
+        for item in complaints:
+            status = {"pending": "⏳ На рассмотрении", "approved": "✅ Одобрена", "rejected": "❌ Отклонена"}.get(item["status"], item["status"])
+            text += (
+                f"🆔 <b>Жалоба №{item['id']}</b>\n"
+                f"👤 {escape(item['username'])}\n"
+                f"📅 {escape(item['created_at'])}\n"
+                f"📌 {status}\n"
+                f"📝 {escape(item['text'][:200])}\n\n"
+            )
+    await call.message.edit_text(text, reply_markup=back_keyboard())
+
+
+# =====================================================
+# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ
+# =====================================================
+
+@dp.callback_query(F.data == "manage_admins")
+async def manage_admins(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить администратора", callback_data="add_admin")
+    builder.button(text="➖ Удалить администратора", callback_data="remove_admin")
+    builder.button(text="⬅️ Назад", callback_data="admin_panel")
+    builder.adjust(1)
+    await call.answer()
+    await call.message.edit_text("👥 <b>Управление администрацией</b>", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_start(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    builder = InlineKeyboardBuilder()
+    for position in POSITIONS:
+        builder.button(text=position, callback_data=f"position:{position}")
+    builder.button(text="⬅️ Назад", callback_data="manage_admins")
+    builder.adjust(1)
+    await state.set_state(AddAdminForm.waiting_for_position)
+    await call.answer()
+    await call.message.edit_text("➕ <b>Добавление администратора</b>\n\nВыберите должность:", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(AddAdminForm.waiting_for_position, F.data.startswith("position:"))
+async def add_admin_position(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    position = call.data.split(":", 1)[1]
+    if position not in POSITIONS:
+        await call.answer("Некорректная должность.")
+        return
+    await state.update_data(position=position)
+    await state.set_state(AddAdminForm.waiting_for_name)
+    await call.answer()
+    await call.message.answer("Введите имя и игровой ник администратора:")
+
+
+@dp.message(AddAdminForm.waiting_for_name)
+async def add_admin_name(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear()
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 100:
+        await message.answer("Введите корректное имя до 100 символов.")
+        return
+    await state.update_data(name=name)
+    await state.set_state(AddAdminForm.waiting_for_link)
+    await message.answer("Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>")
+
+
+@dp.message(AddAdminForm.waiting_for_link)
+async def add_admin_link(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear()
+        return
+    link = (message.text or "").strip()
+    if not valid_telegram_link(link):
+        await message.answer("❌ Некорректная ссылка. Используйте https://t.me/username")
+        return
+    data = await state.get_data()
+    with get_db() as db:
+        db.execute("INSERT INTO admins (position, name, telegram) VALUES (?, ?, ?)", (data["position"], data["name"], link))
+    await state.clear()
+    await message.answer("✅ Администратор добавлен.")
+    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+@dp.callback_query(F.data == "remove_admin")
+async def remove_admin_start(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await call.answer()
+    with get_db() as db:
+        admins = db.execute("SELECT id, name, position FROM admins WHERE position != 'Владелец лиги' ORDER BY id").fetchall()
+    if not admins:
+        await call.message.edit_text("Нет администраторов для удаления.", reply_markup=back_keyboard())
+        return
+    builder = InlineKeyboardBuilder()
+    for admin in admins:
+        builder.button(text=f"❌ {admin['name']} — {admin['position']}", callback_data=f"delete_admin:{admin['id']}")
+    builder.button(text="⬅️ Назад", callback_data="manage_admins")
+    builder.adjust(1)
+    await call.message.edit_text("➖ <b>Выберите администратора для удаления:</b>", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data.startswith("delete_admin:"))
+async def remove_admin_confirm(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        admin_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректный запрос.")
+        return
+    with get_db() as db:
+        cursor = db.execute("DELETE FROM admins WHERE id = ? AND position != 'Владелец лиги'", (admin_id,))
+    if cursor.rowcount == 0:
+        await call.answer("Администратор не найден.", show_alert=True)
+        return
+    await call.answer("Администратор удалён.")
+    await call.message.edit_text("✅ Администратор удалён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+# =====================================================
+# ЗАПУСК
+# =====================================================
+
+async def main():
+    init_db()
+    logger.info("MPHL bot started")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped")
