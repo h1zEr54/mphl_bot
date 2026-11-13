@@ -78,7 +78,6 @@ def get_db():
 
 def init_db():
     with get_db() as db:
-        # Обновляем таблицу admins (добавляем level)
         db.execute("""
             CREATE TABLE IF NOT EXISTS admins (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +88,6 @@ def init_db():
             )
         """)
         
-        # Проверка на наличие колонки level (для старых баз)
         columns = [row["name"] for row in db.execute("PRAGMA table_info(admins)").fetchall()]
         if "level" not in columns:
             db.execute("ALTER TABLE admins ADD COLUMN level TEXT NOT NULL DEFAULT 'Администрация'")
@@ -141,6 +139,29 @@ def init_db():
                 team TEXT NOT NULL UNIQUE,
                 telegram TEXT NOT NULL DEFAULT '',
                 added_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        # ТАБЛИЦА ИГР
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_name TEXT NOT NULL,
+                date_time TEXT NOT NULL,
+                stream_link TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        # ТАБЛИЦА ИТОГОВ
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_name TEXT NOT NULL,
+                date_time TEXT NOT NULL,
+                score TEXT NOT NULL,
+                winner TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
@@ -217,7 +238,7 @@ def get_registered_admin_ids():
 
 
 def valid_telegram_link(link: str):
-    return bool(re.fullmatch(r"https://t\.me/[A-Za-z0-9_]+", link.strip()))
+    return bool(re.fullmatch(r"https?://(t\.me|t\.me/[A-Za-z0-9_]+|www\.twitch\.tv/[A-Za-z0-9_]+|twitch\.tv/[A-Za-z0-9_]+|youtube\.com/.*|youtu\.be/.*)", link.strip()))
 
 
 def main_menu_keyboard(user_id: int, username: str | None = None):
@@ -286,6 +307,23 @@ class AddAdminForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_link = State()
 
+class AddGameForm(StatesGroup):
+    waiting_for_match = State()
+    waiting_for_datetime = State()
+    waiting_for_stream = State()
+
+class DeleteGameForm(StatesGroup):
+    waiting_for_match = State()
+
+class AddResultForm(StatesGroup):
+    waiting_for_datetime = State()
+    waiting_for_match = State()
+    waiting_for_score = State()
+    waiting_for_winner = State()
+
+class DeleteResultForm(StatesGroup):
+    waiting_for_match = State()
+
 
 # =====================================================
 # СТАРТ
@@ -318,21 +356,46 @@ async def home_callback(call: CallbackQuery, state: FSMContext):
         reply_markup=main_menu_keyboard(call.from_user.id, call.from_user.username)
     )
 
+
+# =====================================================
+# ИГРЫ (ПРОСМОТР ДЛЯ ВСЕХ)
+# =====================================================
+
 @dp.callback_query(F.data == "games")
 async def games_callback(call: CallbackQuery):
     await call.answer()
-    await call.message.edit_text(
-        "🎮 <b>Игры MPHL</b>\n\nИнформация об играх скоро появится.",
-        reply_markup=back_keyboard()
-    )
+    with get_db() as db:
+        games = db.execute("SELECT * FROM games ORDER BY id DESC").fetchall()
+    
+    if not games:
+        text = "🎮 <b>Игры MPHL</b>\n\nПока нет запланированных игр."
+    else:
+        text = "🎮 <b>Игры MPHL</b>\n\n"
+        for game in games:
+            stream = game['stream_link'] if game['stream_link'] else "Игра будет без стрима"
+            text += f"📅 {escape(game['date_time'])} | {escape(game['match_name'])} | {escape(stream)}\n\n"
+    
+    await call.message.edit_text(text, reply_markup=back_keyboard(), disable_web_page_preview=True)
+
+
+# =====================================================
+# ИТОГИ (ПРОСМОТР ДЛЯ ВСЕХ)
+# =====================================================
 
 @dp.callback_query(F.data == "results")
 async def results_callback(call: CallbackQuery):
     await call.answer()
-    await call.message.edit_text(
-        "📊 <b>Итоги игр</b>\n\nРезультаты матчей скоро появятся.",
-        reply_markup=back_keyboard()
-    )
+    with get_db() as db:
+        results = db.execute("SELECT * FROM results ORDER BY id DESC").fetchall()
+    
+    if not results:
+        text = "📊 <b>Итоги игр MPHL</b>\n\nПока нет итогов."
+    else:
+        text = "📊 <b>Итоги игр MPHL</b>\n\n"
+        for res in results:
+            text += f"📅 {escape(res['date_time'])} | {escape(res['match_name'])} | {escape(res['score'])} - победа команды - {escape(res['winner'])}\n\n"
+    
+    await call.message.edit_text(text, reply_markup=back_keyboard())
 
 
 # =====================================================
@@ -359,7 +422,7 @@ async def captains_callback(call: CallbackQuery):
 
 
 # =====================================================
-# СОСТАВ АДМИНИСТРАЦИИ (ОБНОВЛЕННЫЙ СПИСОК)
+# АДМИНИСТРАЦИЯ
 # =====================================================
 
 @dp.callback_query(F.data == "admins")
@@ -368,19 +431,15 @@ async def admins_callback(call: CallbackQuery):
     with get_db() as db:
         admins = db.execute("SELECT * FROM admins ORDER BY id").fetchall()
 
-    # Собираем данные в словарь для быстрого доступа: { "Должность": (ник, ссылка) }
     admin_dict = {}
     for admin in admins:
-        # Если на одну должность несколько людей (например, Судья), сохраняем список
         pos = admin['position']
         if pos not in admin_dict:
             admin_dict[pos] = []
         admin_dict[pos].append((admin['name'], admin['telegram']))
 
     def fmt(pos_name):
-        """Возвращает строку для должности или 'Свободно'."""
         if pos_name in admin_dict and admin_dict[pos_name]:
-            # Берем первого (или можно сделать список через запятую)
             name, link = admin_dict[pos_name][0]
             return f"{escape(name)} | {escape(link)}"
         return "Свободно"
@@ -417,6 +476,10 @@ async def admin_panel(call: CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Добавить капитана", callback_data="add_captain")
     builder.button(text="➖ Снять капитана", callback_data="remove_captain")
+    builder.button(text="🎮 Добавить игру", callback_data="add_game")
+    builder.button(text="🗑 Удалить игру", callback_data="delete_game")
+    builder.button(text="📊 Добавить итоги", callback_data="add_result")
+    builder.button(text="🗑 Удалить итоги", callback_data="delete_result")
     if is_owner(call.from_user.id):
         builder.button(text="👥 Управление администрацией", callback_data="manage_admins")
         builder.button(text="📋 История жалоб", callback_data="complaint_history")
@@ -426,6 +489,396 @@ async def admin_panel(call: CallbackQuery):
     await call.message.edit_text(
         "⚙️ <b>Панель администрации MPHL</b>\n\nВыберите действие:",
         reply_markup=builder.as_markup()
+    )
+
+
+# =====================================================
+# УПРАВЛЕНИЕ ИГРАМИ (АДМИН)
+# =====================================================
+
+@dp.callback_query(F.data == "add_game")
+async def add_game_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AddGameForm.waiting_for_match)
+    await call.answer()
+    await call.message.answer(
+        "🎮 <b>Добавление игры</b>\n\n"
+        "Шаг 1. Введите, кто против кого играет (например: Барыс vs Адмирал):\n\n"
+        "Для отмены напишите /cancel."
+    )
+
+@dp.message(AddGameForm.waiting_for_match)
+async def add_game_match(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    match = (message.text or "").strip()
+    if not match or len(match) > 100:
+        await message.answer("❌ Введите корректное название матча (до 100 символов).")
+        return
+    await state.update_data(game_match=match)
+    await state.set_state(AddGameForm.waiting_for_datetime)
+    await message.answer("Шаг 2. Введите дату и время игры (например: 12.11.2026 16:00):")
+
+@dp.message(AddGameForm.waiting_for_datetime)
+async def add_game_datetime(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    dt = (message.text or "").strip()
+    if not dt or len(dt) > 50:
+        await message.answer("❌ Введите корректную дату и время.")
+        return
+    await state.update_data(game_datetime=dt)
+    await state.set_state(AddGameForm.waiting_for_stream)
+    await message.answer("Шаг 3. Отправьте ссылку на стрим (если есть). Если стрима не будет, напишите «Нет»:")
+
+@dp.message(AddGameForm.waiting_for_stream)
+async def add_game_stream(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    stream = (message.text or "").strip()
+    if stream.lower() in {"нет", "no", "без стрима"}:
+        stream = None
+    elif not stream.startswith("http"):
+        await message.answer("❌ Некорректная ссылка. Отправьте ссылку (начинается с http) или напишите «Нет».")
+        return
+
+    data = await state.get_data()
+    with get_db() as db:
+        db.execute("""
+            INSERT INTO games (match_name, date_time, stream_link, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (data["game_match"], data["game_datetime"], stream, datetime.now().strftime("%d.%m.%Y %H:%M")))
+
+    await state.clear()
+    await message.answer("✅ Игра добавлена.")
+    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+@dp.callback_query(F.data == "delete_game")
+async def delete_game_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(DeleteGameForm.waiting_for_match)
+    await call.answer()
+    await call.message.answer(
+        "🗑 <b>Удаление игры</b>\n\n"
+        "Введите название игры, которую хотите удалить (например: Барыс vs Адмирал):\n\n"
+        "Для отмены напишите /cancel."
+    )
+
+@dp.message(DeleteGameForm.waiting_for_match)
+async def delete_game_match(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    match = (message.text or "").strip()
+    with get_db() as db:
+        cursor = db.execute("DELETE FROM games WHERE match_name = ?", (match,))
+    
+    if cursor.rowcount == 0:
+        await message.answer("❌ Игра с таким названием не найдена.")
+    else:
+        await message.answer("✅ Игра удалена.")
+    
+    await state.clear()
+    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+# =====================================================
+# УПРАВЛЕНИЕ ИТОГАМИ (АДМИН)
+# =====================================================
+
+@dp.callback_query(F.data == "add_result")
+async def add_result_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AddResultForm.waiting_for_datetime)
+    await call.answer()
+    await call.message.answer(
+        "📊 <b>Добавление итогов</b>\n\n"
+        "Шаг 1. Введите дату и время игры (например: 12.11.2026 16:00):\n\n"
+        "Для отмены напишите /cancel."
+    )
+
+@dp.message(AddResultForm.waiting_for_datetime)
+async def add_result_datetime(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    dt = (message.text or "").strip()
+    if not dt or len(dt) > 50:
+        await message.answer("❌ Введите корректную дату и время.")
+        return
+    await state.update_data(result_datetime=dt)
+    await state.set_state(AddResultForm.waiting_for_match)
+    await message.answer("Шаг 2. Введите название матча (например: Барыс vs Адмирал):")
+
+@dp.message(AddResultForm.waiting_for_match)
+async def add_result_match(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    match = (message.text or "").strip()
+    if not match or len(match) > 100:
+        await message.answer("❌ Введите корректное название матча.")
+        return
+    await state.update_data(result_match=match)
+    await state.set_state(AddResultForm.waiting_for_score)
+    await message.answer("Шаг 3. Введите счет (например: 3:0):")
+
+@dp.message(AddResultForm.waiting_for_score)
+async def add_result_score(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    score = (message.text or "").strip()
+    if not score or len(score) > 20:
+        await message.answer("❌ Введите корректный счет.")
+        return
+    await state.update_data(result_score=score)
+    await state.set_state(AddResultForm.waiting_for_winner)
+    await message.answer("Шаг 4. Введите название победившей команды (например: Барыс):")
+
+@dp.message(AddResultForm.waiting_for_winner)
+async def add_result_winner(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    winner = (message.text or "").strip()
+    if not winner or len(winner) > 100:
+        await message.answer("❌ Введите корректное название команды.")
+        return
+
+    data = await state.get_data()
+    with get_db() as db:
+        db.execute("""
+            INSERT INTO results (match_name, date_time, score, winner, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (data["result_match"], data["result_datetime"], data["result_score"], winner, datetime.now().strftime("%d.%m.%Y %H:%M")))
+
+    await state.clear()
+    await message.answer("✅ Итоги добавлены.")
+    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+@dp.callback_query(F.data == "delete_result")
+async def delete_result_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(DeleteResultForm.waiting_for_match)
+    await call.answer()
+    await call.message.answer(
+        "🗑 <b>Удаление итогов</b>\n\n"
+        "Введите название матча, итоги которого хотите удалить (например: Барыс vs Адмирал):\n\n"
+        "Для отмены напишите /cancel."
+    )
+
+@dp.message(DeleteResultForm.waiting_for_match)
+async def delete_result_match(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    match = (message.text or "").strip()
+    with get_db() as db:
+        cursor = db.execute("DELETE FROM results WHERE match_name = ?", (match,))
+    
+    if cursor.rowcount == 0:
+        await message.answer("❌ Итоги с таким названием не найдены.")
+    else:
+        await message.answer("✅ Итоги удалены.")
+    
+    await state.clear()
+    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+
+
+# =====================================================
+# ДОБАВЛЕНИЕ КАПИТАНА
+# =====================================================
+
+@dp.callback_query(F.data == "add_captain")
+async def add_captain_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    with get_db() as db:
+        count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
+    if count >= 5:
+        await call.answer("Все пять мест капитанов уже заняты.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AddCaptainForm.waiting_for_name)
+    await call.answer()
+    await call.message.answer(
+        "➕ <b>Добавление капитана</b>\n\n"
+        "1. Введите никнейм и номер капитана.\n\n"
+        "Пример: <code>h1zEr #99</code>\n\nДля отмены напишите /cancel."
+    )
+
+@dp.message(AddCaptainForm.waiting_for_name)
+async def add_captain_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 100:
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
+        return
+    await state.update_data(captain_name=name)
+    await state.set_state(AddCaptainForm.waiting_for_team)
+    await message.answer("2. Введите название команды.\n\nПример: <code>Адмирал</code>")
+
+@dp.message(AddCaptainForm.waiting_for_team)
+async def add_captain_team(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    team = (message.text or "").strip()
+    if not team or len(team) > 100:
+        await message.answer("❌ Введите корректное название команды.")
+        return
+    await state.update_data(captain_team=team)
+    await state.set_state(AddCaptainForm.waiting_for_telegram)
+    await message.answer("3. Отправьте ссылку на Telegram капитана.\n\nПример: <code>https://t.me/h1zEr54</code>")
+
+@dp.message(AddCaptainForm.waiting_for_telegram)
+async def add_captain_telegram(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    telegram = (message.text or "").strip()
+    if not valid_telegram_link(telegram):
+        await message.answer("❌ Некорректная ссылка.\nИспользуйте формат https://t.me/username")
+        return
+    data = await state.get_data()
+    with get_db() as db:
+        count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
+        if count >= 5:
+            await message.answer("❌ Все пять мест капитанов уже заняты.")
+            await state.clear()
+            return
+        exists = db.execute("SELECT id FROM captains WHERE team = ?", (data["captain_team"],)).fetchone()
+        if exists:
+            await message.answer("❌ Эта команда уже добавлена. Введите другое название команды.")
+            return
+        db.execute("""
+            INSERT INTO captains (name, team, telegram, added_by, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            data["captain_name"], data["captain_team"], telegram,
+            message.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M")
+        ))
+    await state.clear()
+    await message.answer(
+        "✅ <b>Капитан успешно добавлен!</b>\n\n"
+        f"👤 Никнейм: {escape(data['captain_name'])}\n"
+        f"🏆 Команда: {escape(data['captain_team'])}\n"
+        f"🔗 Telegram: <a href=\"{escape(telegram)}\">Открыть профиль</a>"
+    )
+    await message.answer(
+        "⚙️ <b>Панель администрации</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить капитана", callback_data="add_captain")],
+            [InlineKeyboardButton(text="➖ Снять капитана", callback_data="remove_captain")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")]
+        ])
+    )
+
+
+# =====================================================
+# СНЯТИЕ КАПИТАНА
+# =====================================================
+
+@dp.callback_query(F.data == "remove_captain")
+async def remove_captain_start(call: CallbackQuery):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await call.answer()
+    with get_db() as db:
+        captains = db.execute("SELECT id, name, team FROM captains ORDER BY id").fetchall()
+    if not captains:
+        await call.message.edit_text(
+            "➖ <b>Снятие капитана</b>\n\nСейчас нет добавленных капитанов.",
+            reply_markup=back_keyboard()
+        )
+        return
+    builder = InlineKeyboardBuilder()
+    for captain in captains:
+        builder.button(
+            text=f"❌ {captain['name']} — {captain['team']}",
+            callback_data=f"remove_captain_confirm:{captain['id']}"
+        )
+    builder.button(text="⬅️ Назад в админ-панель", callback_data="admin_panel")
+    builder.adjust(1)
+    await call.message.edit_text(
+        "➖ <b>Снятие капитана</b>\n\nВыберите капитана, которого нужно снять:",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(F.data.startswith("remove_captain_confirm:"))
+async def remove_captain_confirm(call: CallbackQuery):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        captain_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректный запрос.", show_alert=True)
+        return
+    with get_db() as db:
+        captain = db.execute("SELECT name, team FROM captains WHERE id = ?", (captain_id,)).fetchone()
+    if not captain:
+        await call.answer("Капитан уже удалён или не найден.", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, снять", callback_data=f"remove_captain_final:{captain_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="remove_captain")
+        ]
+    ])
+    await call.answer()
+    await call.message.edit_text(
+        "⚠️ <b>Подтверждение снятия капитана</b>\n\n"
+        f"👤 Никнейм: {escape(captain['name'])}\n"
+        f"🏆 Команда: {escape(captain['team'])}\n\n"
+        "Вы действительно хотите снять этого капитана?",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data.startswith("remove_captain_final:"))
+async def remove_captain_final(call: CallbackQuery):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        captain_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректный запрос.", show_alert=True)
+        return
+    with get_db() as db:
+        cursor = db.execute("DELETE FROM captains WHERE id = ?", (captain_id,))
+    if cursor.rowcount == 0:
+        await call.answer("Капитан уже удалён.", show_alert=True)
+        return
+    await call.answer("Капитан снят.")
+    await call.message.edit_text(
+        "✅ <b>Капитан успешно снят!</b>\n\nЕго место теперь отображается как «Свободно».",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➖ Снять ещё капитана", callback_data="remove_captain")],
+            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
+        ])
     )
 
 
@@ -1028,7 +1481,7 @@ async def complaint_history(call: CallbackQuery):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ (ДОБАВЛЕНИЕ И УДАЛЕНИЕ)
+# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ
 # =====================================================
 
 @dp.callback_query(F.data == "manage_admins")
@@ -1079,8 +1532,6 @@ async def add_admin_level(call: CallbackQuery, state: FSMContext):
     
     await state.update_data(level=level)
     
-    # Теперь показываем доступные должности для этого уровня
-    # Но для простоты показываем все, чтобы админ сам выбрал
     builder = InlineKeyboardBuilder()
     for position in POSITIONS:
         builder.button(text=position, callback_data=f"position:{position}")
@@ -1140,9 +1591,7 @@ async def add_admin_link(message: Message, state: FSMContext):
     data = await state.get_data()
     
     with get_db() as db:
-        # Удаляем старого админа с этой должности (если есть), чтобы не было дублей
         db.execute("DELETE FROM admins WHERE position = ?", (data["position"],))
-        # Добавляем нового
         db.execute(
             "INSERT INTO admins (position, name, telegram, level) VALUES (?, ?, ?, ?)",
             (data["position"], data["name"], link, data["level"])
