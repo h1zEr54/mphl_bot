@@ -55,9 +55,7 @@ bot = Bot(
 
 dp = Dispatcher()
 
-# Буферы для альбомов
-_complaint_album_buffers = {}
-_suggestion_user_locks = {}
+_user_locks = {}
 
 
 # =====================================================
@@ -112,16 +110,20 @@ def init_db():
             )
         """)
         db.execute("""
-            CREATE TABLE IF NOT EXISTS admin_user_ids (
-                user_id INTEGER PRIMARY KEY
+            CREATE TABLE IF NOT EXISTS unban_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                steam_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                ban_date TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL
             )
         """)
         db.execute("""
-            CREATE TABLE IF NOT EXISTS suggestion_media_refs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                suggestion_id INTEGER NOT NULL,
-                source_chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL
+            CREATE TABLE IF NOT EXISTS admin_user_ids (
+                user_id INTEGER PRIMARY KEY
             )
         """)
         db.execute("""
@@ -243,7 +245,10 @@ async def show_main_menu(message: Message):
 # =====================================================
 
 class ComplaintForm(StatesGroup):
-    waiting_for_text = State()
+    waiting_for_nickname = State()
+    waiting_for_admin_nickname = State()
+    waiting_for_violation = State()
+    waiting_for_proof = State()
 
 class SuggestionForm(StatesGroup):
     waiting_for_nickname = State()
@@ -252,6 +257,12 @@ class SuggestionForm(StatesGroup):
 
 class SuggestionReplyForm(StatesGroup):
     waiting_for_reply = State()
+
+class UnbanForm(StatesGroup):
+    waiting_for_steamid = State()
+    waiting_for_reason = State()
+    waiting_for_date = State()
+    waiting_for_media = State()
 
 class AddCaptainForm(StatesGroup):
     waiting_for_name = State()
@@ -293,14 +304,6 @@ async def home_callback(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(
         "🏒 <b>Главное меню MPHL</b>\n\nВыберите нужный раздел:",
         reply_markup=main_menu_keyboard(call.from_user.id, call.from_user.username)
-    )
-
-@dp.callback_query(F.data == "unban")
-async def unban_callback(call: CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(
-        "🔓 <b>Разбан</b>\n\nДля подачи заявки на разбан обратитесь к администрации лиги.",
-        reply_markup=back_keyboard()
     )
 
 @dp.callback_query(F.data == "games")
@@ -390,182 +393,354 @@ async def admin_panel(call: CallbackQuery):
 
 
 # =====================================================
-# ДОБАВЛЕНИЕ КАПИТАНА
+# РАЗБАН (ФОРМА)
 # =====================================================
 
-@dp.callback_query(F.data == "add_captain")
-async def add_captain_start(call: CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id, call.from_user.username):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
-    if count >= 5:
-        await call.answer("Все пять мест капитанов уже заняты.", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(AddCaptainForm.waiting_for_name)
+@dp.callback_query(F.data == "unban")
+async def unban_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
+    await state.clear()
+    await state.set_state(UnbanForm.waiting_for_steamid)
     await call.message.answer(
-        "➕ <b>Добавление капитана</b>\n\n"
-        "1. Введите никнейм и номер капитана.\n\n"
-        "Пример: <code>h1zEr #99</code>\n\nДля отмены напишите /cancel."
+        "🔓 <b>Заявка на разбан</b>\n\n"
+        "Шаг 1. Введите ваш SteamID64 (17 цифр, начинается на 765...):\n\n"
+        "Для отмены напишите /cancel."
     )
 
-@dp.message(AddCaptainForm.waiting_for_name)
-async def add_captain_name(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id, message.from_user.username):
-        await state.clear()
+@dp.message(UnbanForm.waiting_for_steamid)
+async def unban_steamid(message: Message, state: FSMContext):
+    steam_id = (message.text or "").strip()
+    if not re.fullmatch(r"765\d{14}", steam_id):
+        await message.answer("❌ Неверный формат SteamID64. Он должен начинаться с 765 и содержать 17 цифр.")
         return
-    name = (message.text or "").strip()
-    if not name or len(name) > 100:
+    await state.update_data(unban_steamid=steam_id)
+    await state.set_state(UnbanForm.waiting_for_reason)
+    await message.answer("Шаг 2. Опишите суть бана (за что забанили):")
+
+@dp.message(UnbanForm.waiting_for_reason)
+async def unban_reason(message: Message, state: FSMContext):
+    reason = (message.text or "").strip()
+    if not reason or len(reason) > 1000:
+        await message.answer("❌ Опишите причину (до 1000 символов).")
+        return
+    await state.update_data(unban_reason=reason)
+    await state.set_state(UnbanForm.waiting_for_date)
+    await message.answer("Шаг 3. Введите дату выдачи бана (например, 12.11.2026):")
+
+@dp.message(UnbanForm.waiting_for_date)
+async def unban_date(message: Message, state: FSMContext):
+    ban_date = (message.text or "").strip()
+    if not ban_date or len(ban_date) > 50:
+        await message.answer("❌ Введите корректную дату.")
+        return
+    await state.update_data(unban_date=ban_date)
+    await state.set_state(UnbanForm.waiting_for_media)
+    await message.answer(
+        "Шаг 4. Прикрепите доказательства (фото/видео бана), если есть.\n"
+        "Когда закончите, напишите «Готово». Если доказательств нет — «Пропустить»."
+    )
+
+@dp.message(UnbanForm.waiting_for_media)
+async def unban_media(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_items = list(data.get("unban_media_items", []))
+    
+    command = (message.text or "").strip().lower()
+    if command in {"готово", "гатово", "done", "завершить"}:
+        if not media_items:
+            await message.answer("Вы не прикрепили файлы. Напишите «Пропустить», если их нет.")
+            return
+        await _send_unban_request(message, state, media_items=media_items)
+        return
+
+    if command in {"пропустить", "нет", "без фото", "без видео"}:
+        await _send_unban_request(message, state)
+        return
+
+    media_type = None
+    media_file_id = None
+    if message.photo:
+        media_type, media_file_id = "photo", message.photo[-1].file_id
+    elif message.video:
+        media_type, media_file_id = "video", message.video.file_id
+    elif message.document:
+        media_type, media_file_id = "document", message.document.file_id
+
+    if media_type:
+        lock = _user_locks.setdefault(message.from_user.id, asyncio.Lock())
+        async with lock:
+            latest = await state.get_data()
+            media_items = list(latest.get("unban_media_items", []))
+            media_items.append((media_type, media_file_id))
+            await state.update_data(unban_media_items=media_items)
+            count = len(media_items)
+        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».")
+        return
+
+    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».")
+
+async def _send_unban_request(message: Message, state: FSMContext, media_items: list | None = None):
+    data = await state.get_data()
+    user = message.from_user
+    username = f"@{user.username}" if user.username else user.full_name
+
+    with get_db() as db:
+        cursor = db.execute("""
+            INSERT INTO unban_requests (user_id, username, steam_id, reason, ban_date, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """, (
+            user.id, username, data["unban_steamid"], data["unban_reason"],
+            data["unban_date"], datetime.now().strftime("%d.%m.%Y %H:%M")
+        ))
+        request_id = cursor.lastrowid
+
+    admin_text = (
+        "🔓 <b>Новая заявка на разбан</b>\n\n"
+        f"🆔 Номер: <code>{request_id}</code>\n"
+        f"👤 Отправитель: {escape(username)}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n"
+        f"🎮 SteamID64: <code>{escape(data['unban_steamid'])}</code>\n"
+        f"📅 Дата бана: {escape(data['unban_date'])}\n\n"
+        f"📝 <b>Суть бана:</b>\n{escape(data['unban_reason'])}"
+    )
+
+    try:
+        await bot.send_message(OWNER_ID, admin_text)
+        if media_items:
+            album = []
+            for kind, file_id in media_items:
+                if kind == "photo":
+                    album.append(InputMediaPhoto(media=file_id))
+                elif kind == "video":
+                    album.append(InputMediaVideo(media=file_id))
+                elif kind == "document":
+                    album.append(InputMediaDocument(media=file_id))
+            
+            if len(album) >= 2:
+                await bot.send_media_group(OWNER_ID, album)
+            elif len(album) == 1:
+                kind, file_id = media_items[0]
+                if kind == "photo":
+                    await bot.send_photo(OWNER_ID, file_id)
+                elif kind == "video":
+                    await bot.send_video(OWNER_ID, file_id)
+                else:
+                    await bot.send_document(OWNER_ID, file_id)
+    except TelegramAPIError:
+        logger.exception("Ошибка отправки заявки на разбан владельцу")
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Заявка на разбан №{request_id} отправлена!</b>\n\n"
+        "Владелец рассмотрит её в ближайшее время."
+    )
+    await show_main_menu(message)
+
+
+# =====================================================
+# ЖАЛОБЫ (ПОШАГОВАЯ ФОРМА)
+# =====================================================
+
+@dp.callback_query(F.data == "complaint")
+async def complaint_start(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.clear()
+    await state.set_state(ComplaintForm.waiting_for_nickname)
+    await call.message.answer(
+        "⚠️ <b>Жалоба на администрацию</b>\n\n"
+        "Шаг 1. Введите ваш игровой никнейм:\n\n"
+        "Для отмены напишите /cancel."
+    )
+
+@dp.message(ComplaintForm.waiting_for_nickname)
+async def complaint_nickname(message: Message, state: FSMContext):
+    nickname = (message.text or "").strip()
+    if not nickname or len(nickname) > 100:
         await message.answer("❌ Введите корректный никнейм (до 100 символов).")
         return
-    await state.update_data(captain_name=name)
-    await state.set_state(AddCaptainForm.waiting_for_team)
-    await message.answer("2. Введите название команды.\n\nПример: <code>Адмирал</code>")
+    await state.update_data(complaint_nickname=nickname)
+    await state.set_state(ComplaintForm.waiting_for_admin_nickname)
+    await message.answer("Шаг 2. Введите никнейм администратора, на которого жалуетесь:")
 
-@dp.message(AddCaptainForm.waiting_for_team)
-async def add_captain_team(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id, message.from_user.username):
-        await state.clear()
+@dp.message(ComplaintForm.waiting_for_admin_nickname)
+async def complaint_admin_nickname(message: Message, state: FSMContext):
+    admin_nickname = (message.text or "").strip()
+    if not admin_nickname or len(admin_nickname) > 100:
+        await message.answer("❌ Введите корректный никнейм администратора.")
         return
-    team = (message.text or "").strip()
-    if not team or len(team) > 100:
-        await message.answer("❌ Введите корректное название команды.")
-        return
-    await state.update_data(captain_team=team)
-    await state.set_state(AddCaptainForm.waiting_for_telegram)
-    await message.answer("3. Отправьте ссылку на Telegram капитана.\n\nПример: <code>https://t.me/h1zEr54</code>")
+    await state.update_data(complaint_admin_nickname=admin_nickname)
+    await state.set_state(ComplaintForm.waiting_for_violation)
+    await message.answer("Шаг 3. Опишите, что нарушил администратор (суть проблемы):")
 
-@dp.message(AddCaptainForm.waiting_for_telegram)
-async def add_captain_telegram(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id, message.from_user.username):
-        await state.clear()
+@dp.message(ComplaintForm.waiting_for_violation)
+async def complaint_violation(message: Message, state: FSMContext):
+    violation = (message.text or "").strip()
+    if not violation or len(violation) > 3500:
+        await message.answer("❌ Опишите нарушение (до 3500 символов).")
         return
-    telegram = (message.text or "").strip()
-    if not valid_telegram_link(telegram):
-        await message.answer("❌ Некорректная ссылка.\nИспользуйте формат https://t.me/username")
-        return
+    await state.update_data(complaint_violation=violation)
+    await state.set_state(ComplaintForm.waiting_for_proof)
+    await message.answer(
+        "Шаг 4. Прикрепите доказательства (фото/видео/документы).\n"
+        "Можно прикрепить до 4-х штук. Когда закончите, напишите «Готово». Если доказательств нет — «Пропустить»."
+    )
+
+@dp.message(ComplaintForm.waiting_for_proof)
+async def complaint_proof(message: Message, state: FSMContext):
     data = await state.get_data()
+    media_items = list(data.get("complaint_media_items", []))
+    media_refs = list(data.get("complaint_media_refs", []))
+
+    command = (message.text or "").strip().lower()
+    if command in {"готово", "гатово", "done", "завершить"}:
+        if not media_items:
+            await message.answer("Вы ещё не прикрепили доказательства. Отправьте фото или напишите «Пропустить».")
+            return
+        await _send_complaint_to_owner(message, state, media_items=media_items, media_refs=media_refs)
+        return
+
+    if command in {"пропустить", "нет", "без фото", "без видео"}:
+        await _send_complaint_to_owner(message, state)
+        return
+
+    media_type = None
+    media_file_id = None
+    if message.photo:
+        media_type, media_file_id = "photo", message.photo[-1].file_id
+    elif message.video:
+        media_type, media_file_id = "video", message.video.file_id
+    elif message.document:
+        media_type, media_file_id = "document", message.document.file_id
+
+    if media_type:
+        lock = _user_locks.setdefault(message.from_user.id, asyncio.Lock())
+        async with lock:
+            latest = await state.get_data()
+            media_items = list(latest.get("complaint_media_items", []))
+            media_refs = list(latest.get("complaint_media_refs", []))
+            
+            if len(media_items) >= 4:
+                await message.answer("❌ К сожалению, я не принимаю больше 4-х фотографий за раз.")
+                return
+
+            media_items.append((media_type, media_file_id))
+            media_refs.append((message.chat.id, message.message_id))
+            await state.update_data(complaint_media_items=media_items, complaint_media_refs=media_refs)
+            count = len(media_items)
+        await message.answer(f"📎 Доказательство добавлено ({count}/4). Можете отправить ещё или написать «Готово».")
+        return
+
+    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».")
+
+
+async def _send_complaint_to_owner(message: Message, state: FSMContext, media_items: list | None = None, media_refs: list | None = None):
+    data = await state.get_data()
+    user = message.from_user
+    username = f"@{user.username}" if user.username else user.full_name
+
+    text = (
+        f"1. Никнейм заявителя: {data['complaint_nickname']}\n"
+        f"2. Никнейм администратора: {data['complaint_admin_nickname']}\n"
+        f"3. Что нарушил: {data['complaint_violation']}"
+    )
+
     with get_db() as db:
-        count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
-        if count >= 5:
-            await message.answer("❌ Все пять мест капитанов уже заняты.")
-            await state.clear()
-            return
-        exists = db.execute("SELECT id FROM captains WHERE team = ?", (data["captain_team"],)).fetchone()
-        if exists:
-            await message.answer("❌ Эта команда уже добавлена. Введите другое название команды.")
-            return
-        db.execute("""
-            INSERT INTO captains (name, team, telegram, added_by, created_at)
+        cursor = db.execute("""
+            INSERT INTO complaints (user_id, username, text, status, created_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (
-            data["captain_name"], data["captain_team"], telegram,
-            message.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M")
-        ))
+        """, (user.id, username, text, "pending", datetime.now().strftime("%d.%m.%Y %H:%M")))
+        complaint_id = cursor.lastrowid
+
+    admin_text = (
+        f"⚠️ <b>Новая жалоба №{complaint_id}</b>\n\n"
+        f"👤 Отправитель: {escape(username)}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
+        f"📝 <b>Детали жалобы:</b>\n{escape(text)}"
+    )
+
+    try:
+        await bot.send_message(
+            OWNER_ID,
+            admin_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"complaint:approve:{complaint_id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"complaint:reject:{complaint_id}")
+                ]
+            ])
+        )
+        
+        if media_items:
+            album = []
+            for kind, file_id in media_items:
+                if kind == "photo":
+                    album.append(InputMediaPhoto(media=file_id))
+                elif kind == "video":
+                    album.append(InputMediaVideo(media=file_id))
+                elif kind == "document":
+                    album.append(InputMediaDocument(media=file_id))
+            
+            if len(album) >= 2:
+                await bot.send_media_group(OWNER_ID, album)
+            elif len(album) == 1:
+                kind, file_id = media_items[0]
+                if kind == "photo":
+                    await bot.send_photo(OWNER_ID, file_id)
+                elif kind == "video":
+                    await bot.send_video(OWNER_ID, file_id)
+                else:
+                    await bot.send_document(OWNER_ID, file_id)
+                    
+    except TelegramAPIError:
+        logger.exception("Ошибка отправки жалобы владельцу")
+
     await state.clear()
     await message.answer(
-        "✅ <b>Капитан успешно добавлен!</b>\n\n"
-        f"👤 Никнейм: {escape(data['captain_name'])}\n"
-        f"🏆 Команда: {escape(data['captain_team'])}\n"
-        f"🔗 Telegram: <a href=\"{escape(telegram)}\">Открыть профиль</a>"
+        f"✅ <b>Жалоба №{complaint_id} успешно отправлена!</b>\n\n"
+        "Администрация рассмотрит её в ближайшее время."
     )
-    await message.answer(
-        "⚙️ <b>Панель администрации</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить капитана", callback_data="add_captain")],
-            [InlineKeyboardButton(text="➖ Снять капитана", callback_data="remove_captain")],
-            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")]
-        ])
-    )
+    await show_main_menu(message)
 
 
-# =====================================================
-# СНЯТИЕ КАПИТАНА
-# =====================================================
-
-@dp.callback_query(F.data == "remove_captain")
-async def remove_captain_start(call: CallbackQuery):
-    if not is_admin(call.from_user.id, call.from_user.username):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    await call.answer()
-    with get_db() as db:
-        captains = db.execute("SELECT id, name, team FROM captains ORDER BY id").fetchall()
-    if not captains:
-        await call.message.edit_text(
-            "➖ <b>Снятие капитана</b>\n\nСейчас нет добавленных капитанов.",
-            reply_markup=back_keyboard()
-        )
-        return
-    builder = InlineKeyboardBuilder()
-    for captain in captains:
-        builder.button(
-            text=f"❌ {captain['name']} — {captain['team']}",
-            callback_data=f"remove_captain_confirm:{captain['id']}"
-        )
-    builder.button(text="⬅️ Назад в админ-панель", callback_data="admin_panel")
-    builder.adjust(1)
-    await call.message.edit_text(
-        "➖ <b>Снятие капитана</b>\n\nВыберите капитана, которого нужно снять:",
-        reply_markup=builder.as_markup()
-    )
-
-@dp.callback_query(F.data.startswith("remove_captain_confirm:"))
-async def remove_captain_confirm(call: CallbackQuery):
-    if not is_admin(call.from_user.id, call.from_user.username):
+@dp.callback_query(F.data.startswith("complaint:"))
+async def complaint_decision(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
         await call.answer("Нет доступа.", show_alert=True)
         return
     try:
-        captain_id = int(call.data.split(":")[1])
-    except (ValueError, IndexError):
-        await call.answer("Некорректный запрос.", show_alert=True)
+        _, action, complaint_id = call.data.split(":")
+        complaint_id = int(complaint_id)
+    except (ValueError, AttributeError):
+        await call.answer("Некорректный запрос.")
+        return
+    if action == "approve":
+        status = "approved"
+        result = "одобрена"
+    elif action == "reject":
+        status = "rejected"
+        result = "отклонена"
+    else:
+        await call.answer("Неизвестное действие.")
         return
     with get_db() as db:
-        captain = db.execute("SELECT name, team FROM captains WHERE id = ?", (captain_id,)).fetchone()
-    if not captain:
-        await call.answer("Капитан уже удалён или не найден.", show_alert=True)
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да, снять", callback_data=f"remove_captain_final:{captain_id}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="remove_captain")
-        ]
-    ])
-    await call.answer()
-    await call.message.edit_text(
-        "⚠️ <b>Подтверждение снятия капитана</b>\n\n"
-        f"👤 Никнейм: {escape(captain['name'])}\n"
-        f"🏆 Команда: {escape(captain['team'])}\n\n"
-        "Вы действительно хотите снять этого капитана?",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query(F.data.startswith("remove_captain_final:"))
-async def remove_captain_final(call: CallbackQuery):
-    if not is_admin(call.from_user.id, call.from_user.username):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    try:
-        captain_id = int(call.data.split(":")[1])
-    except (ValueError, IndexError):
-        await call.answer("Некорректный запрос.", show_alert=True)
-        return
-    with get_db() as db:
-        cursor = db.execute("DELETE FROM captains WHERE id = ?", (captain_id,))
+        cursor = db.execute("""
+            UPDATE complaints SET status = ? WHERE id = ? AND status = 'pending'
+        """, (status, complaint_id))
+        complaint = db.execute("SELECT user_id FROM complaints WHERE id = ?", (complaint_id,)).fetchone()
     if cursor.rowcount == 0:
-        await call.answer("Капитан уже удалён.", show_alert=True)
+        await call.answer("Жалоба уже обработана или не найдена.", show_alert=True)
         return
-    await call.answer("Капитан снят.")
-    await call.message.edit_text(
-        "✅ <b>Капитан успешно снят!</b>\n\nЕго место теперь отображается как «Свободно».",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➖ Снять ещё капитана", callback_data="remove_captain")],
-            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
-        ])
-    )
+    await call.answer("Статус обновлён.")
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.")
+    except TelegramAPIError:
+        logger.exception("Не удалось обновить сообщение жалобы")
+    if complaint:
+        try:
+            await bot.send_message(complaint["user_id"], f"📋 Ваша жалоба №{complaint_id} {result}.")
+        except TelegramAPIError:
+            logger.exception("Не удалось уведомить автора жалобы")
 
 
 # =====================================================
@@ -634,7 +809,7 @@ async def suggestion_media(message: Message, state: FSMContext):
         media_type, media_file_id = "document", message.document.file_id
 
     if media_type:
-        lock = _suggestion_user_locks.setdefault(message.from_user.id, asyncio.Lock())
+        lock = _user_locks.setdefault(message.from_user.id, asyncio.Lock())
         async with lock:
             latest = await state.get_data()
             media_items = list(latest.get("suggestion_media_items", []))
@@ -785,148 +960,6 @@ async def suggestion_reply_send(message: Message, state: FSMContext):
         db.execute("UPDATE suggestions SET status = 'answered' WHERE id = ?", (suggestion_id,))
     await state.clear()
     await message.answer(f"✅ Ответ на заявку №{suggestion_id} отправлен.")
-
-
-# =====================================================
-# ЖАЛОБЫ
-# =====================================================
-
-@dp.callback_query(F.data == "complaint")
-async def complaint_start(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await state.set_state(ComplaintForm.waiting_for_text)
-    await call.message.answer(
-        "⚠️ <b>Жалоба на администрацию</b>\n\n"
-        "Опишите жалобу одним сообщением. "
-        "Можно прикрепить до 4-х фотографий.\n\n"
-        "Для отмены напишите /cancel."
-    )
-
-@dp.message(ComplaintForm.waiting_for_text)
-async def complaint_submit(message: Message, state: FSMContext):
-    if message.media_group_id:
-        group_id = message.media_group_id
-        if group_id not in _complaint_album_buffers:
-            _complaint_album_buffers[group_id] = {
-                "messages": [],
-                "text": message.caption or "Жалоба с вложением",
-                "user": message.from_user,
-                "task": None
-            }
-        _complaint_album_buffers[group_id]["messages"].append(message)
-        
-        if _complaint_album_buffers[group_id]["task"]:
-            _complaint_album_buffers[group_id]["task"].cancel()
-        
-        async def send_later():
-            await asyncio.sleep(1.5)
-            await _process_complaint_album(group_id, state)
-        
-        _complaint_album_buffers[group_id]["task"] = asyncio.create_task(send_later())
-        return
-
-    text = message.text or message.caption or "Жалоба с вложением"
-    photos = [message] if (message.photo or message.document) else []
-    
-    await _send_complaint_to_owner(message, text, message.from_user, photos)
-    await state.clear()
-    await message.answer(
-        "✅ <b>Жалоба успешно отправлена!</b>\n\n"
-        "Администрация рассмотрит её в ближайшее время."
-    )
-    await show_main_menu(message)
-
-async def _process_complaint_album(group_id: str, state: FSMContext):
-    buffer = _complaint_album_buffers.pop(group_id, None)
-    if not buffer:
-        return
-    messages = buffer["messages"]
-    text = buffer["text"]
-    user = buffer["user"]
-    photos = [m for m in messages if m.photo or m.document]
-    
-    await _send_complaint_to_owner(messages[0], text, user, photos)
-    
-    await state.clear()
-    await messages[0].answer(
-        "✅ <b>Жалоба успешно отправлена!</b>\n\n"
-        "Администрация рассмотрит её в ближайшее время."
-    )
-    await show_main_menu(messages[0])
-
-async def _send_complaint_to_owner(message: Message, text: str, user, photos: list):
-    username = f"@{user.username}" if user.username else user.full_name
-    with get_db() as db:
-        cursor = db.execute("""
-            INSERT INTO complaints (user_id, username, text, status, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user.id, username, text, "pending", datetime.now().strftime("%d.%m.%Y %H:%M")))
-        complaint_id = cursor.lastrowid
-
-    admin_text = (
-        "⚠️ <b>Новая жалоба!</b>\n\n"
-        f"🆔 Номер: <code>{complaint_id}</code>\n"
-        f"👤 Отправитель: {escape(username)}\n"
-        f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
-        f"📝 Жалоба:\n{escape(text)}"
-    )
-
-    try:
-        await bot.send_message(
-            OWNER_ID,
-            admin_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"complaint:approve:{complaint_id}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"complaint:reject:{complaint_id}")
-                ]
-            ])
-        )
-        for msg in photos:
-            await msg.copy_to(OWNER_ID)
-    except TelegramAPIError:
-        logger.exception("Ошибка отправки жалобы владельцу")
-
-
-@dp.callback_query(F.data.startswith("complaint:"))
-async def complaint_decision(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    try:
-        _, action, complaint_id = call.data.split(":")
-        complaint_id = int(complaint_id)
-    except (ValueError, AttributeError):
-        await call.answer("Некорректный запрос.")
-        return
-    if action == "approve":
-        status = "approved"
-        result = "одобрена"
-    elif action == "reject":
-        status = "rejected"
-        result = "отклонена"
-    else:
-        await call.answer("Неизвестное действие.")
-        return
-    with get_db() as db:
-        cursor = db.execute("""
-            UPDATE complaints SET status = ? WHERE id = ? AND status = 'pending'
-        """, (status, complaint_id))
-        complaint = db.execute("SELECT user_id FROM complaints WHERE id = ?", (complaint_id,)).fetchone()
-    if cursor.rowcount == 0:
-        await call.answer("Жалоба уже обработана или не найдена.", show_alert=True)
-        return
-    await call.answer("Статус обновлён.")
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.")
-    except TelegramAPIError:
-        logger.exception("Не удалось обновить сообщение жалобы")
-    if complaint:
-        try:
-            await bot.send_message(complaint["user_id"], f"📋 Ваша жалоба №{complaint_id} {result}.")
-        except TelegramAPIError:
-            logger.exception("Не удалось уведомить автора жалобы")
 
 
 # =====================================================
