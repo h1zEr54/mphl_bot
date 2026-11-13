@@ -56,8 +56,8 @@ bot = Bot(
 dp = Dispatcher()
 
 # Буферы для альбомов
-_suggestion_album_buffers = {}
 _complaint_album_buffers = {}
+_suggestion_user_locks = {}
 
 
 # =====================================================
@@ -135,7 +135,7 @@ def init_db():
             )
         """)
 
-        # Добавление владельца по умолчанию, если таблица пуста
+        # Добавление владельца по умолчанию
         count = db.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
         if count == 0:
             db.execute("""
@@ -570,7 +570,7 @@ async def remove_captain_final(call: CallbackQuery):
 
 
 # =====================================================
-# ПРЕДЛОЖЕНИЯ (УЛУЧШЕНИЯ)
+# ПРЕДЛОЖЕНИЯ (ПОШАГОВЫЙ ВВОД)
 # =====================================================
 
 @dp.callback_query(F.data == "suggestion")
@@ -580,100 +580,89 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(SuggestionForm.waiting_for_nickname)
     await call.message.answer(
         "💡 <b>Форма подачи заявок по улучшению</b>\n\n"
-        "1. Ваш никнейм:\n"
-        "2. Суть вашего предложения:\n"
-        "3. Фото/видео (если имеются):\n\n"
-        "<b>Пример:</b>\n\n"
-        "1. h1zEr\n"
-        "2. Текст\n"
-        "3. Фото/видео\n\n"
+        "Шаг 1. Введите ваш игровой никнейм:\n\n"
         "Для отмены напишите /cancel."
     )
 
+
 @dp.message(SuggestionForm.waiting_for_nickname)
 async def suggestion_nickname(message: Message, state: FSMContext):
-    raw_text = (message.text or message.caption or "").strip()
-    if not raw_text:
-        await message.answer("Отправьте никнейм или заполните всю форму одним сообщением.")
-        return
-    matches = list(re.finditer(r"(?<!\w)([123])[.)]\s*", raw_text))
-    fields = {}
-    if matches and matches[0].group(1) == "1":
-        for index, match in enumerate(matches):
-            number = int(match.group(1))
-            value_start = match.end()
-            value_end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
-            fields[number] = raw_text[value_start:value_end].strip(" \t\r\n\\")
-    if 1 in fields and 2 in fields:
-        nickname = fields[1].strip()
-        proposal = fields[2].strip()
-        extra = fields.get(3, "").strip()
-        if not nickname or not proposal:
-            await message.answer("Заполните пункты 1 и 2: никнейм и суть предложения.")
-            return
-        if len(nickname) > 100 or len(proposal) > 3500:
-            await message.answer("Проверьте форму: никнейм — до 100 символов, предложение — до 3500 символов.")
-            return
-        if extra and extra.lower() not in {"нет", "пропустить", "фото/видео", "фото", "видео", "если имеются", "если имеются."}:
-            proposal += "\n\nДополнение к пункту 3: " + extra
-        await state.update_data(suggestion_nickname=nickname, suggestion_text=proposal)
-        media_type = None
-        media_file_id = None
-        if message.photo:
-            media_type, media_file_id = "photo", message.photo[-1].file_id
-        elif message.video:
-            media_type, media_file_id = "video", message.video.file_id
-        elif message.document:
-            media_type, media_file_id = "document", message.document.file_id
-        no_media = extra.lower().strip(" .") in {"нет", "пропустить", "без фото", "без видео", "не имеются", "не требуется", "отсутствуют"}
-        if media_type and message.media_group_id:
-            await state.update_data(
-                suggestion_media_items=[(media_type, media_file_id)],
-                suggestion_media_refs=[(message.chat.id, message.message_id)],
-                suggestion_album_group_id=message.media_group_id
-            )
-            await state.set_state(SuggestionForm.waiting_for_media)
-            asyncio.create_task(_submit_captioned_album(message, state))
-        elif media_type:
-            await submit_suggestion(message, state, media_type, media_file_id, media_refs=[(message.chat.id, message.message_id)])
-        elif no_media:
-            await submit_suggestion(message, state)
-        else:
-            await state.set_state(SuggestionForm.waiting_for_media)
-            await state.update_data(suggestion_media_items=[], suggestion_media_refs=[])
-            await message.answer(
-                "✅ Данные формы приняты. Теперь отправьте фотографии/видео отдельными сообщениями (можно несколько).\n"
-                "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
-            )
-        return
-    nickname = re.sub(r"^\s*1[.)]\s*", "", raw_text).strip()
+    nickname = (message.text or "").strip()
     if not nickname or len(nickname) > 100:
-        await message.answer(
-            "Введите никнейм или отправьте всю форму сразу в формате:\n"
-            "1. Никнейм\n2. Суть предложения\n3. Фото/видео (если имеются)"
-        )
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
         return
+    
     await state.update_data(suggestion_nickname=nickname)
     await state.set_state(SuggestionForm.waiting_for_text)
-    await message.answer("2. Опишите суть вашего предложения:")
+    await message.answer("Шаг 2. Опишите суть вашего предложения (до 3500 символов):")
+
 
 @dp.message(SuggestionForm.waiting_for_text)
 async def suggestion_text(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text or len(text) > 3500:
-        await message.answer("Отправьте текст предложения (до 3500 символов).")
+        await message.answer("❌ Отправьте текст предложения (до 3500 символов).")
         return
+    
     await state.update_data(suggestion_text=text)
     await state.set_state(SuggestionForm.waiting_for_media)
     await message.answer(
-        "3. Отправьте все нужные фото/видео/файлы (можно несколькими сообщениями).\n"
+        "Шаг 3. Прикрепите фото/видео/документы (если есть).\n"
         "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
     )
 
-async def submit_suggestion(message: Message, state: FSMContext, media_type: str | None = None, media_file_id: str | None = None, media_items: list | None = None, media_refs: list | None = None):
+
+@dp.message(SuggestionForm.waiting_for_media)
+async def suggestion_media(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_items = list(data.get("suggestion_media_items", []))
+    media_refs = list(data.get("suggestion_media_refs", []))
+
+    command = (message.text or "").strip().lower()
+    if command in {"готово", "гатово", "done", "завершить"}:
+        if not media_items:
+            await message.answer("Вы ещё не прикрепили файлы. Отправьте фото/видео или напишите «Пропустить».")
+            return
+        await submit_suggestion(message, state, media_items=media_items, media_refs=media_refs)
+        return
+
+    if command in {"пропустить", "нет", "без фото", "без видео"}:
+        await submit_suggestion(message, state)
+        return
+
+    media_type = None
+    media_file_id = None
+    if message.photo:
+        media_type, media_file_id = "photo", message.photo[-1].file_id
+    elif message.video:
+        media_type, media_file_id = "video", message.video.file_id
+    elif message.document:
+        media_type, media_file_id = "document", message.document.file_id
+
+    if media_type:
+        lock = _suggestion_user_locks.setdefault(message.from_user.id, asyncio.Lock())
+        async with lock:
+            latest = await state.get_data()
+            media_items = list(latest.get("suggestion_media_items", []))
+            media_refs = list(latest.get("suggestion_media_refs", []))
+            media_items.append((media_type, media_file_id))
+            media_refs.append((message.chat.id, message.message_id))
+            await state.update_data(suggestion_media_items=media_items, suggestion_media_refs=media_refs)
+            count = len(media_items)
+        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».")
+        return
+
+    await message.answer("Прикрепите фото, видео или документ. Когда закончите, напишите «Готово».")
+
+
+async def submit_suggestion(message: Message, state: FSMContext, media_items: list | None = None, media_refs: list | None = None):
     data = await state.get_data()
     user = message.from_user
     username = f"@{user.username}" if user.username else user.full_name
+    
+    media_type = media_items[0][0] if media_items else None
+    media_file_id = media_items[0][1] if media_items else None
+
     with get_db() as db:
         cursor = db.execute("""
             INSERT INTO suggestions (user_id, username, nickname, text, media_type, media_file_id, status, created_at)
@@ -689,8 +678,10 @@ async def submit_suggestion(message: Message, state: FSMContext, media_type: str
                 "INSERT INTO suggestion_media_refs (suggestion_id, source_chat_id, message_id) VALUES (?, ?, ?)",
                 (suggestion_id, source_chat_id, message_id)
             )
+
     admin_ids = set(get_registered_admin_ids())
     admin_ids.add(OWNER_ID)
+    
     admin_text = (
         "💡 <b>Новое предложение по улучшению</b>\n\n"
         f"🆔 Заявка №<code>{suggestion_id}</code>\n"
@@ -700,23 +691,13 @@ async def submit_suggestion(message: Message, state: FSMContext, media_type: str
         f"📝 <b>Предложение:</b>\n{escape(data['suggestion_text'])}"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✉️ Ответить", callback_data=f"suggestion_reply:{suggestion_id}")]])
+
     delivered = 0
     for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, admin_text, reply_markup=keyboard)
             delivered += 1
-            if media_refs:
-                grouped_refs = {}
-                for source_chat_id, message_id in media_refs:
-                    grouped_refs.setdefault(source_chat_id, []).append(message_id)
-                forward_many = getattr(bot, "forward_messages", None)
-                for source_chat_id, message_ids in grouped_refs.items():
-                    if callable(forward_many):
-                        await forward_many(chat_id=admin_id, from_chat_id=source_chat_id, message_ids=message_ids)
-                    else:
-                        for message_id in message_ids:
-                            await bot.forward_message(chat_id=admin_id, from_chat_id=source_chat_id, message_id=message_id)
-            elif media_items:
+            if media_items:
                 album = []
                 for kind, file_id in media_items:
                     if kind == "photo":
@@ -725,6 +706,7 @@ async def submit_suggestion(message: Message, state: FSMContext, media_type: str
                         album.append(InputMediaVideo(media=file_id))
                     elif kind == "document":
                         album.append(InputMediaDocument(media=file_id))
+                
                 for offset in range(0, len(album), 10):
                     chunk = album[offset:offset + 10]
                     if len(chunk) >= 2:
@@ -737,14 +719,9 @@ async def submit_suggestion(message: Message, state: FSMContext, media_type: str
                             await bot.send_video(admin_id, file_id)
                         else:
                             await bot.send_document(admin_id, file_id)
-            elif media_type == "photo":
-                await bot.send_photo(admin_id, media_file_id)
-            elif media_type == "video":
-                await bot.send_video(admin_id, media_file_id)
-            elif media_type == "document":
-                await bot.send_document(admin_id, media_file_id)
         except TelegramAPIError:
             logger.warning("Не удалось уведомить администратора %s", admin_id, exc_info=True)
+
     await state.clear()
     result = (
         "✅ <b>Предложение принято и сохранено!</b>\n"
@@ -755,54 +732,6 @@ async def submit_suggestion(message: Message, state: FSMContext, media_type: str
         result += "\n\n⚠️ Заявка сохранена, но уведомления администраторам не доставлены."
     await message.answer(result)
     await show_main_menu(message)
-
-async def _submit_captioned_album(first_message: Message, state: FSMContext):
-    await asyncio.sleep(2.0)
-    data = await state.get_data()
-    refs = data.get("suggestion_media_refs", [])
-    if not refs:
-        return
-    items = data.get("suggestion_media_items", [])
-    first_kind, first_file_id = items[0] if items else (None, None)
-    await submit_suggestion(first_message, state, media_type=first_kind, media_file_id=first_file_id, media_items=items, media_refs=refs)
-
-_suggestion_user_locks = {}
-
-@dp.message(SuggestionForm.waiting_for_media)
-async def suggestion_media(message: Message, state: FSMContext):
-    data = await state.get_data()
-    media_items = list(data.get("suggestion_media_items", []))
-    media_type = None
-    media_file_id = None
-    if message.photo:
-        media_type, media_file_id = "photo", message.photo[-1].file_id
-    elif message.video:
-        media_type, media_file_id = "video", message.video.file_id
-    elif message.document:
-        media_type, media_file_id = "document", message.document.file_id
-    if media_type:
-        lock = _suggestion_user_locks.setdefault(message.from_user.id, asyncio.Lock())
-        async with lock:
-            latest = await state.get_data()
-            media_items = list(latest.get("suggestion_media_items", []))
-            media_refs = list(latest.get("suggestion_media_refs", []))
-            media_items.append((media_type, media_file_id))
-            media_refs.append((message.chat.id, message.message_id))
-            await state.update_data(suggestion_media_items=media_items, suggestion_media_refs=media_refs)
-            count = len(media_items)
-        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».")
-        return
-    command = (message.text or "").strip().lower()
-    if command in {"готово", "гатово", "done", "завершить"}:
-        if not media_items:
-            await message.answer("Вы ещё не прикрепили файлы. Отправьте фото/видео или напишите «Пропустить».")
-            return
-        await submit_suggestion(message, state, media_items=media_items, media_type=media_items[0][0], media_file_id=media_items[0][1], media_refs=data.get("suggestion_media_refs", []))
-        return
-    if command in {"пропустить", "нет", "без фото", "без видео"}:
-        await submit_suggestion(message, state)
-        return
-    await message.answer("Прикрепите фото, видео или документ. Когда закончите, напишите «Готово».")
 
 
 @dp.callback_query(F.data.startswith("suggestion_reply:"))
@@ -825,9 +754,8 @@ async def suggestion_reply_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(SuggestionReplyForm.waiting_for_reply)
     await state.update_data(suggestion_id=suggestion_id, suggestion_user_id=suggestion["user_id"])
     await call.answer()
-    await call.message.answer(
-        f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel."
-    )
+    await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel.")
+
 
 @dp.message(SuggestionReplyForm.waiting_for_reply)
 async def suggestion_reply_send(message: Message, state: FSMContext):
@@ -863,7 +791,7 @@ async def suggestion_reply_send(message: Message, state: FSMContext):
 
 
 # =====================================================
-# ЖАЛОБЫ (ИСПРАВЛЕННЫЙ БЛОК)
+# ЖАЛОБЫ (С ПОДДЕРЖКОЙ АЛЬБОМОВ)
 # =====================================================
 
 @dp.callback_query(F.data == "complaint")
@@ -879,7 +807,6 @@ async def complaint_start(call: CallbackQuery, state: FSMContext):
 
 @dp.message(ComplaintForm.waiting_for_text)
 async def complaint_submit(message: Message, state: FSMContext):
-    # Если это альбом
     if message.media_group_id:
         group_id = message.media_group_id
         if group_id not in _complaint_album_buffers:
@@ -901,7 +828,6 @@ async def complaint_submit(message: Message, state: FSMContext):
         _complaint_album_buffers[group_id]["task"] = asyncio.create_task(send_later())
         return
 
-    # Если одиночное сообщение
     text = message.text or message.caption or "Жалоба с вложением"
     photos = [message] if (message.photo or message.document) else []
     
@@ -917,257 +843,4 @@ async def _process_complaint_album(group_id: str, state: FSMContext):
     buffer = _complaint_album_buffers.pop(group_id, None)
     if not buffer:
         return
-    messages = buffer["messages"]
-    text = buffer["text"]
-    user = buffer["user"]
-    photos = [m for m in messages if m.photo or m.document]
-    
-    await _send_complaint_to_owner(messages[0], text, user, photos)
-    
-    await state.clear()
-    await messages[0].answer(
-        "✅ <b>Жалоба успешно отправлена!</b>\n\n"
-        "Администрация рассмотрит её в ближайшее время."
-    )
-    await show_main_menu(messages[0])
-
-async def _send_complaint_to_owner(message: Message, text: str, user, photos: list):
-    username = f"@{user.username}" if user.username else user.full_name
-    with get_db() as db:
-        cursor = db.execute("""
-            INSERT INTO complaints (user_id, username, text, status, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user.id, username, text, "pending", datetime.now().strftime("%d.%m.%Y %H:%M")))
-        complaint_id = cursor.lastrowid
-
-    admin_text = (
-        "⚠️ <b>Новая жалоба!</b>\n\n"
-        f"🆔 Номер: <code>{complaint_id}</code>\n"
-        f"👤 Отправитель: {escape(username)}\n"
-        f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
-        f"📝 Жалоба:\n{escape(text)}"
-    )
-
-    try:
-        await bot.send_message(
-            OWNER_ID,
-            admin_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"complaint:approve:{complaint_id}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"complaint:reject:{complaint_id}")
-                ]
-            ])
-        )
-        # Пересылаем фото
-        for msg in photos:
-            await msg.copy_to(OWNER_ID)
-            
-    except TelegramAPIError:
-        logger.exception("Ошибка отправки жалобы владельцу")
-
-
-@dp.callback_query(F.data.startswith("complaint:"))
-async def complaint_decision(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    try:
-        _, action, complaint_id = call.data.split(":")
-        complaint_id = int(complaint_id)
-    except (ValueError, AttributeError):
-        await call.answer("Некорректный запрос.")
-        return
-    if action == "approve":
-        status = "approved"
-        result = "одобрена"
-    elif action == "reject":
-        status = "rejected"
-        result = "отклонена"
-    else:
-        await call.answer("Неизвестное действие.")
-        return
-    with get_db() as db:
-        cursor = db.execute("""
-            UPDATE complaints SET status = ? WHERE id = ? AND status = 'pending'
-        """, (status, complaint_id))
-        complaint = db.execute("SELECT user_id FROM complaints WHERE id = ?", (complaint_id,)).fetchone()
-    if cursor.rowcount == 0:
-        await call.answer("Жалоба уже обработана или не найдена.", show_alert=True)
-        return
-    await call.answer("Статус обновлён.")
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.")
-    except TelegramAPIError:
-        logger.exception("Не удалось обновить сообщение жалобы")
-    if complaint:
-        try:
-            await bot.send_message(complaint["user_id"], f"📋 Ваша жалоба №{complaint_id} {result}.")
-        except TelegramAPIError:
-            logger.exception("Не удалось уведомить автора жалобы")
-
-
-# =====================================================
-# ИСТОРИЯ ЖАЛОБ
-# =====================================================
-
-@dp.callback_query(F.data == "complaint_history")
-async def complaint_history(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    await call.answer()
-    with get_db() as db:
-        complaints = db.execute("SELECT * FROM complaints ORDER BY id DESC LIMIT 10").fetchall()
-    text = "📋 <b>Последние жалобы</b>\n\n"
-    if not complaints:
-        text += "Жалоб пока нет."
-    else:
-        for item in complaints:
-            status = {"pending": "⏳ На рассмотрении", "approved": "✅ Одобрена", "rejected": "❌ Отклонена"}.get(item["status"], item["status"])
-            text += (
-                f"🆔 <b>Жалоба №{item['id']}</b>\n"
-                f"👤 {escape(item['username'])}\n"
-                f"📅 {escape(item['created_at'])}\n"
-                f"📌 {status}\n"
-                f"📝 {escape(item['text'][:200])}\n\n"
-            )
-    await call.message.edit_text(text, reply_markup=back_keyboard())
-
-
-# =====================================================
-# УПРАВЛЕНИЕ АДМИНИСТРАЦИЕЙ
-# =====================================================
-
-@dp.callback_query(F.data == "manage_admins")
-async def manage_admins(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить администратора", callback_data="add_admin")
-    builder.button(text="➖ Удалить администратора", callback_data="remove_admin")
-    builder.button(text="⬅️ Назад", callback_data="admin_panel")
-    builder.adjust(1)
-    await call.answer()
-    await call.message.edit_text("👥 <b>Управление администрацией</b>", reply_markup=builder.as_markup())
-
-
-@dp.callback_query(F.data == "add_admin")
-async def add_admin_start(call: CallbackQuery, state: FSMContext):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    builder = InlineKeyboardBuilder()
-    for position in POSITIONS:
-        builder.button(text=position, callback_data=f"position:{position}")
-    builder.button(text="⬅️ Назад", callback_data="manage_admins")
-    builder.adjust(1)
-    await state.set_state(AddAdminForm.waiting_for_position)
-    await call.answer()
-    await call.message.edit_text("➕ <b>Добавление администратора</b>\n\nВыберите должность:", reply_markup=builder.as_markup())
-
-
-@dp.callback_query(AddAdminForm.waiting_for_position, F.data.startswith("position:"))
-async def add_admin_position(call: CallbackQuery, state: FSMContext):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    position = call.data.split(":", 1)[1]
-    if position not in POSITIONS:
-        await call.answer("Некорректная должность.")
-        return
-    await state.update_data(position=position)
-    await state.set_state(AddAdminForm.waiting_for_name)
-    await call.answer()
-    await call.message.answer("Введите имя и игровой ник администратора:")
-
-
-@dp.message(AddAdminForm.waiting_for_name)
-async def add_admin_name(message: Message, state: FSMContext):
-    if not is_owner(message.from_user.id):
-        await state.clear()
-        return
-    name = (message.text or "").strip()
-    if not name or len(name) > 100:
-        await message.answer("Введите корректное имя до 100 символов.")
-        return
-    await state.update_data(name=name)
-    await state.set_state(AddAdminForm.waiting_for_link)
-    await message.answer("Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>")
-
-
-@dp.message(AddAdminForm.waiting_for_link)
-async def add_admin_link(message: Message, state: FSMContext):
-    if not is_owner(message.from_user.id):
-        await state.clear()
-        return
-    link = (message.text or "").strip()
-    if not valid_telegram_link(link):
-        await message.answer("❌ Некорректная ссылка. Используйте https://t.me/username")
-        return
-    data = await state.get_data()
-    with get_db() as db:
-        db.execute("INSERT INTO admins (position, name, telegram) VALUES (?, ?, ?)", (data["position"], data["name"], link))
-    await state.clear()
-    await message.answer("✅ Администратор добавлен.")
-    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
-
-
-@dp.callback_query(F.data == "remove_admin")
-async def remove_admin_start(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    await call.answer()
-    with get_db() as db:
-        admins = db.execute("SELECT id, name, position FROM admins WHERE position != 'Владелец лиги' ORDER BY id").fetchall()
-    if not admins:
-        await call.message.edit_text("Нет администраторов для удаления.", reply_markup=back_keyboard())
-        return
-    builder = InlineKeyboardBuilder()
-    for admin in admins:
-        builder.button(text=f"❌ {admin['name']} — {admin['position']}", callback_data=f"delete_admin:{admin['id']}")
-    builder.button(text="⬅️ Назад", callback_data="manage_admins")
-    builder.adjust(1)
-    await call.message.edit_text("➖ <b>Выберите администратора для удаления:</b>", reply_markup=builder.as_markup())
-
-
-@dp.callback_query(F.data.startswith("delete_admin:"))
-async def remove_admin_confirm(call: CallbackQuery):
-    if not is_owner(call.from_user.id):
-        await call.answer("Нет доступа.", show_alert=True)
-        return
-    try:
-        admin_id = int(call.data.split(":")[1])
-    except (ValueError, IndexError):
-        await call.answer("Некорректный запрос.")
-        return
-    with get_db() as db:
-        cursor = db.execute("DELETE FROM admins WHERE id = ? AND position != 'Владелец лиги'", (admin_id,))
-    if cursor.rowcount == 0:
-        await call.answer("Администратор не найден.", show_alert=True)
-        return
-    await call.answer("Администратор удалён.")
-    await call.message.edit_text("✅ Администратор удалён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
-
-
-# =====================================================
-# ЗАПУСК
-# =====================================================
-
-async def main():
-    init_db()
-    logger.info("MPHL bot started")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped")
+   
