@@ -171,7 +171,6 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
-        # НОВАЯ ТАБЛИЦА ДЛЯ СТАТИСТИКИ
         db.execute("""
             CREATE TABLE IF NOT EXISTS team_stats (
                 team_name TEXT PRIMARY KEY,
@@ -258,7 +257,6 @@ def valid_telegram_link(link: str):
 
 
 def update_stats(match_name: str, winner: str):
-    """Обновляет статистику в team_stats при добавлении итога."""
     teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
     if len(teams) != 2:
         return
@@ -439,7 +437,7 @@ async def results_callback(call: CallbackQuery):
 
 
 # =====================================================
-# ТОП КОМАНД (из отдельной таблицы team_stats)
+# ТОП КОМАНД
 # =====================================================
 
 @dp.callback_query(F.data == "top_teams")
@@ -447,7 +445,6 @@ async def top_teams_callback(call: CallbackQuery):
     await call.answer()
     
     with get_db() as db:
-        # Берем данные из отдельной таблицы team_stats
         stats = db.execute("""
             SELECT team_name, games, wins, losses, points
             FROM team_stats
@@ -559,15 +556,66 @@ async def admin_panel(call: CallbackQuery):
     builder.button(text="🗑 Удалить игру", callback_data="delete_game")
     builder.button(text="📊 Добавить итоги", callback_data="add_result")
     builder.button(text="🗑 Удалить итоги", callback_data="delete_result")
+    
+    # Кнопка "Очистить таблицу" только для владельца
     if is_owner(call.from_user.id):
+        builder.button(text="🧹 Очистить таблицу", callback_data="clear_table")
         builder.button(text="👥 Управление администрацией", callback_data="manage_admins")
         builder.button(text="📋 История жалоб", callback_data="complaint_history")
+        
     builder.button(text="⬅️ В главное меню", callback_data="home")
     builder.adjust(1)
     await call.answer()
     await call.message.edit_text(
         "⚙️ <b>Панель администрации MPHL</b>\n\nВыберите действие:",
         reply_markup=builder.as_markup()
+    )
+
+
+# =====================================================
+# ОЧИСТИТЬ ТАБЛИЦУ (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА)
+# =====================================================
+
+@dp.callback_query(F.data == "clear_table")
+async def clear_table_start(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    
+    await call.answer()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, очистить всё", callback_data="clear_table_confirm"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")
+        ]
+    ])
+    await call.message.edit_text(
+        "⚠️ <b>Внимание!</b>\n\n"
+        "Вы собираетесь <b>полностью очистить</b> таблицу итогов и статистики топ-команд.\n"
+        "Это действие <b>нельзя отменить</b>.\n\n"
+        "Вы уверены?",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data == "clear_table_confirm")
+async def clear_table_confirm(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    
+    with get_db() as db:
+        # Очищаем таблицу результатов
+        db.execute("DELETE FROM results")
+        # Очищаем таблицу статистики
+        db.execute("DELETE FROM team_stats")
+    
+    await call.answer("Таблицы очищены.")
+    await call.message.edit_text(
+        "✅ <b>Таблицы успешно очищены!</b>\n\n"
+        "Все итоги и статистика топ-команд удалены.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
+        ])
     )
 
 
@@ -672,7 +720,7 @@ async def delete_game_match(message: Message, state: FSMContext):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ ИТОГАМИ (с автообновлением статистики)
+# УПРАВЛЕНИЕ ИТОГАМИ
 # =====================================================
 
 @dp.callback_query(F.data == "add_result")
@@ -745,7 +793,6 @@ async def add_result_winner(message: Message, state: FSMContext):
             VALUES (?, ?, ?, ?, ?)
         """, (data["result_match"], data["result_datetime"], data["result_score"], winner, datetime.now().strftime("%d.%m.%Y %H:%M")))
     
-    # АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ СТАТИСТИКИ
     update_stats(data["result_match"], winner)
 
     await state.clear()
@@ -779,7 +826,7 @@ async def delete_result_match(message: Message, state: FSMContext):
     if cursor.rowcount == 0:
         await message.answer("❌ Итоги с таким названием не найдены.")
     else:
-        await message.answer("✅ Итоги удалены. Статистика в топ-командах осталась без изменений (если нужно откатить — удали вручную).")
+        await message.answer("✅ Итоги удалены. Статистика в топ-командах осталась без изменений.")
     
     await state.clear()
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
