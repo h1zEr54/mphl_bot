@@ -43,7 +43,6 @@ if not OWNER_ID or not OWNER_ID.isdigit():
 
 OWNER_ID = int(OWNER_ID)
 
-# База данных в /app/data для Bothost
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "mphl_bot.db"
@@ -257,6 +256,7 @@ def main_menu_keyboard(user_id: int, username: str | None = None):
     builder.button(text="💡 Предложение по улучшению", callback_data="suggestion")
     builder.button(text="🎮 Игры", callback_data="games")
     builder.button(text="📊 Итоги игр", callback_data="results")
+    builder.button(text="🏆 Топ - команды", callback_data="top_teams") # <--- НОВАЯ КНОПКА
     if is_admin(user_id, username):
         builder.button(text="⚙️ Админ-панель", callback_data="admin_panel")
     builder.adjust(1)
@@ -401,6 +401,71 @@ async def results_callback(call: CallbackQuery):
         text = "📊 <b>Итоги игр MPHL</b>\n\n"
         for res in results:
             text += f"📅 {escape(res['date_time'])} | {escape(res['match_name'])} | {escape(res['score'])} - победа команды - {escape(res['winner'])}\n\n"
+    
+    await call.message.edit_text(text, reply_markup=back_keyboard())
+
+
+# =====================================================
+# ТОП КОМАНД
+# =====================================================
+
+@dp.callback_query(F.data == "top_teams")
+async def top_teams_callback(call: CallbackQuery):
+    await call.answer()
+    
+    with get_db() as db:
+        results = db.execute("SELECT match_name, winner FROM results").fetchall()
+    
+    if not results:
+        await call.message.edit_text(
+            "🏆 <b>Топ команд</b>\n\nПока нет сыгранных матчей для подсчета статистики.",
+            reply_markup=back_keyboard()
+        )
+        return
+
+    stats = {}
+
+    for res in results:
+        match_name = res["match_name"]
+        winner = res["winner"]
+        
+        teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
+        
+        if len(teams) != 2:
+            continue
+            
+        team1, team2 = teams[0].strip(), teams[1].strip()
+        
+        for team in [team1, team2]:
+            if team not in stats:
+                stats[team] = {"games": 0, "wins": 0, "losses": 0, "points": 0}
+        
+        stats[team1]["games"] += 1
+        stats[team2]["games"] += 1
+        
+        if winner.lower() == team1.lower():
+            stats[team1]["wins"] += 1
+            stats[team1]["points"] += 1
+            stats[team2]["losses"] += 1
+        elif winner.lower() == team2.lower():
+            stats[team2]["wins"] += 1
+            stats[team2]["points"] += 1
+            stats[team1]["losses"] += 1
+
+    sorted_teams = sorted(stats.items(), key=lambda x: (x[1]["points"], x[1]["wins"]), reverse=True)
+    top_5 = sorted_teams[:5]
+
+    text = "🏆 <b>Топ - команды MPHL</b>\n\n"
+    text += "<pre>"
+    text += "Команда      | И | В | П | О\n"
+    text += "-------------|---|---|---|--\n"
+    
+    for team, data in top_5:
+        team_name = team[:12].ljust(12)
+        text += f"{team_name} | {data['games']} | {data['wins']} | {data['losses']} | {data['points']}\n"
+        
+    text += "</pre>"
+    text += "\n<i>И - Игры, В - Выигрыши, П - Проигрыши, О - Очки</i>"
     
     await call.message.edit_text(text, reply_markup=back_keyboard())
 
