@@ -171,6 +171,16 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        # НОВАЯ ТАБЛИЦА ДЛЯ СТАТИСТИКИ
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS team_stats (
+                team_name TEXT PRIMARY KEY,
+                games INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0
+            )
+        """)
 
         count = db.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
         if count == 0:
@@ -247,6 +257,29 @@ def valid_telegram_link(link: str):
     return bool(re.fullmatch(r"https?://(t\.me|www\.twitch\.tv|twitch\.tv|youtube\.com|youtu\.be)/[A-Za-z0-9_/]+", link.strip()))
 
 
+def update_stats(match_name: str, winner: str):
+    """Обновляет статистику в team_stats при добавлении итога."""
+    teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
+    if len(teams) != 2:
+        return
+    
+    team1, team2 = teams[0].strip(), teams[1].strip()
+    
+    with get_db() as db:
+        for team in [team1, team2]:
+            db.execute("INSERT OR IGNORE INTO team_stats (team_name) VALUES (?)", (team,))
+        
+        db.execute("UPDATE team_stats SET games = games + 1 WHERE team_name = ?", (team1,))
+        db.execute("UPDATE team_stats SET games = games + 1 WHERE team_name = ?", (team2,))
+        
+        if winner.lower() == team1.lower():
+            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + 1 WHERE team_name = ?", (team1,))
+            db.execute("UPDATE team_stats SET losses = losses + 1 WHERE team_name = ?", (team2,))
+        elif winner.lower() == team2.lower():
+            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + 1 WHERE team_name = ?", (team2,))
+            db.execute("UPDATE team_stats SET losses = losses + 1 WHERE team_name = ?", (team1,))
+
+
 def main_menu_keyboard(user_id: int, username: str | None = None):
     builder = InlineKeyboardBuilder()
     builder.button(text="🏆 Капитаны и их команды", callback_data="captains")
@@ -256,7 +289,7 @@ def main_menu_keyboard(user_id: int, username: str | None = None):
     builder.button(text="💡 Предложение по улучшению", callback_data="suggestion")
     builder.button(text="🎮 Игры", callback_data="games")
     builder.button(text="📊 Итоги игр", callback_data="results")
-    builder.button(text="🏆 Топ - команды", callback_data="top_teams") # <--- НОВАЯ КНОПКА
+    builder.button(text="🏆 Топ - команды", callback_data="top_teams")
     if is_admin(user_id, username):
         builder.button(text="⚙️ Админ-панель", callback_data="admin_panel")
     builder.adjust(1)
@@ -406,7 +439,7 @@ async def results_callback(call: CallbackQuery):
 
 
 # =====================================================
-# ТОП КОМАНД
+# ТОП КОМАНД (из отдельной таблицы team_stats)
 # =====================================================
 
 @dp.callback_query(F.data == "top_teams")
@@ -414,55 +447,29 @@ async def top_teams_callback(call: CallbackQuery):
     await call.answer()
     
     with get_db() as db:
-        results = db.execute("SELECT match_name, winner FROM results").fetchall()
+        # Берем данные из отдельной таблицы team_stats
+        stats = db.execute("""
+            SELECT team_name, games, wins, losses, points
+            FROM team_stats
+            ORDER BY points DESC, wins DESC
+            LIMIT 5
+        """).fetchall()
     
-    if not results:
+    if not stats:
         await call.message.edit_text(
-            "🏆 <b>Топ команд</b>\n\nПока нет сыгранных матчей для подсчета статистики.",
+            "🏆 <b>Топ команд</b>\n\nПока нет данных для отображения.",
             reply_markup=back_keyboard()
         )
         return
-
-    stats = {}
-
-    for res in results:
-        match_name = res["match_name"]
-        winner = res["winner"]
-        
-        teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
-        
-        if len(teams) != 2:
-            continue
-            
-        team1, team2 = teams[0].strip(), teams[1].strip()
-        
-        for team in [team1, team2]:
-            if team not in stats:
-                stats[team] = {"games": 0, "wins": 0, "losses": 0, "points": 0}
-        
-        stats[team1]["games"] += 1
-        stats[team2]["games"] += 1
-        
-        if winner.lower() == team1.lower():
-            stats[team1]["wins"] += 1
-            stats[team1]["points"] += 1
-            stats[team2]["losses"] += 1
-        elif winner.lower() == team2.lower():
-            stats[team2]["wins"] += 1
-            stats[team2]["points"] += 1
-            stats[team1]["losses"] += 1
-
-    sorted_teams = sorted(stats.items(), key=lambda x: (x[1]["points"], x[1]["wins"]), reverse=True)
-    top_5 = sorted_teams[:5]
 
     text = "🏆 <b>Топ - команды MPHL</b>\n\n"
     text += "<pre>"
     text += "Команда      | И | В | П | О\n"
     text += "-------------|---|---|---|--\n"
     
-    for team, data in top_5:
-        team_name = team[:12].ljust(12)
-        text += f"{team_name} | {data['games']} | {data['wins']} | {data['losses']} | {data['points']}\n"
+    for row in stats:
+        team_name = row["team_name"][:12].ljust(12)
+        text += f"{team_name} | {row['games']} | {row['wins']} | {row['losses']} | {row['points']}\n"
         
     text += "</pre>"
     text += "\n<i>И - Игры, В - Выигрыши, П - Проигрыши, О - Очки</i>"
@@ -665,7 +672,7 @@ async def delete_game_match(message: Message, state: FSMContext):
 
 
 # =====================================================
-# УПРАВЛЕНИЕ ИТОГАМИ
+# УПРАВЛЕНИЕ ИТОГАМИ (с автообновлением статистики)
 # =====================================================
 
 @dp.callback_query(F.data == "add_result")
@@ -737,9 +744,12 @@ async def add_result_winner(message: Message, state: FSMContext):
             INSERT INTO results (match_name, date_time, score, winner, created_at)
             VALUES (?, ?, ?, ?, ?)
         """, (data["result_match"], data["result_datetime"], data["result_score"], winner, datetime.now().strftime("%d.%m.%Y %H:%M")))
+    
+    # АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ СТАТИСТИКИ
+    update_stats(data["result_match"], winner)
 
     await state.clear()
-    await message.answer("✅ Итоги добавлены.")
+    await message.answer("✅ Итоги добавлены, статистика обновлена.")
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
 
 
@@ -769,7 +779,7 @@ async def delete_result_match(message: Message, state: FSMContext):
     if cursor.rowcount == 0:
         await message.answer("❌ Итоги с таким названием не найдены.")
     else:
-        await message.answer("✅ Итоги удалены.")
+        await message.answer("✅ Итоги удалены. Статистика в топ-командах осталась без изменений (если нужно откатить — удали вручную).")
     
     await state.clear()
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
