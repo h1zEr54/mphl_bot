@@ -43,7 +43,7 @@ if not OWNER_ID or not OWNER_ID.isdigit():
 
 OWNER_ID = int(OWNER_ID)
 
-# ВАЖНО: база данных хранится в /app/data, чтобы не удаляться при перезапуске
+# База данных в /app/data для Bothost
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "mphl_bot.db"
@@ -425,7 +425,7 @@ async def captains_callback(call: CallbackQuery):
         else:
             text += f"<b>{number}. Команда — Свободно</b>\n\n"
     text += "📝 <a href=\"https://t.me/infomphl/7\">Подать заявку</a>"
-    await call.message.edit_text(text, reply_markup=back_keyboard())
+    await call.message.edit_text(text, reply_markup=back_keyboard(), disable_web_page_preview=True)
 
 
 # =====================================================
