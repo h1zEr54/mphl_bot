@@ -459,14 +459,22 @@ async def top_teams_callback(call: CallbackQuery):
         )
         return
 
+    # Находим самую длинную команду, чтобы выровнять таблицу
+    max_len = max(len(row["team_name"]) for row in stats)
+    # Минимальная ширина колонки — 12 символов
+    width = max(max_len, 12)
+
     text = "🏆 <b>Топ - команды MPHL</b>\n\n"
     text += "<pre>"
-    text += "Команда      | И | В | П | О\n"
-    text += "-------------|---|---|---|--\n"
+    
+    # Заголовок
+    text += f"{'Команда':<{width}} | {'И':>2} | {'В':>2} | {'П':>2} | {'О':>2}\n"
+    text += f"{'-' * width}-|----|----|----|---\n"
     
     for row in stats:
-        team_name = row["team_name"][:12].ljust(12)
-        text += f"{team_name} | {row['games']} | {row['wins']} | {row['losses']} | {row['points']}\n"
+        # Выравниваем по левому краю, но без обрезания
+        team_name = row["team_name"].ljust(width)
+        text += f"{team_name} | {row['games']:>2} | {row['wins']:>2} | {row['losses']:>2} | {row['points']:>2}\n"
         
     text += "</pre>"
     text += "\n<i>И - Игры, В - Выигрыши, П - Проигрыши, О - Очки</i>"
@@ -557,7 +565,6 @@ async def admin_panel(call: CallbackQuery):
     builder.button(text="📊 Добавить итоги", callback_data="add_result")
     builder.button(text="🗑 Удалить итоги", callback_data="delete_result")
     
-    # Кнопка "Очистить таблицу" только для владельца
     if is_owner(call.from_user.id):
         builder.button(text="🧹 Очистить таблицу", callback_data="clear_table")
         builder.button(text="👥 Управление администрацией", callback_data="manage_admins")
@@ -604,9 +611,7 @@ async def clear_table_confirm(call: CallbackQuery):
         return
     
     with get_db() as db:
-        # Очищаем таблицу результатов
         db.execute("DELETE FROM results")
-        # Очищаем таблицу статистики
         db.execute("DELETE FROM team_stats")
     
     await call.answer("Таблицы очищены.")
