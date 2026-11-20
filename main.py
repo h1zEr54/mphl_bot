@@ -289,7 +289,7 @@ def main_menu_keyboard(user_id: int, username: str | None = None):
     builder.button(text="💡 Предложение по улучшению", callback_data="suggestion")
     builder.button(text="🎮 Игры", callback_data="games")
     builder.button(text="📊 Итоги игр", callback_data="results")
-    builder.button(text="🏆 Топ - команды", callback_data="top_teams")
+    builder.button(text="🏆 Таблица команд", callback_data="top_teams")
     if is_admin(user_id, username):
         builder.button(text="⚙️ Админ-панель", callback_data="admin_panel")
     builder.adjust(2)
