@@ -508,19 +508,47 @@ async def top_teams_callback(call: CallbackQuery):
 async def captains_callback(call: CallbackQuery):
     await call.answer()
     with get_db() as db:
-        captains = db.execute("SELECT name, team, telegram FROM captains ORDER BY id LIMIT 5").fetchall()
-    text = "🏆 <b>Капитаны и их команды MPHL</b>\n\n"
-    for number in range(1, 6):
+        captains = db.execute(
+            "SELECT name, team, telegram FROM captains ORDER BY id LIMIT 8"
+        ).fetchall()
+
+    captain_blocks = []
+    for number in range(1, 9):
         if number <= len(captains):
             captain = captains[number - 1]
-            text += f"<b>{number}. Команда — {escape(captain['name'])} | {escape(captain['team'])}</b>\n"
-            if captain["telegram"]:
-                text += f"👤 <a href=\"{escape(captain['telegram'])}\">Telegram капитана</a>\n"
-            text += "\n"
+            name = escape(captain["name"])
+            team = escape(captain["team"])
+            link = (captain["telegram"] or "").strip()
+
+            if link and re.match(r"^https?://", link, flags=re.IGNORECASE):
+                captain_line = f'  └ Капитан: <a href="{escape(link)}">{name} ↗</a>'
+            else:
+                captain_line = f"  └ Капитан: {name}"
+
+            block = (
+                f"<b>🏒 КОМАНДА №{number}</b>\n"
+                f"  ├ Название: {team}\n"
+                f"{captain_line}"
+            )
         else:
-            text += f"<b>{number}. Команда — Свободно</b>\n\n"
-    text += "📝 <a href=\"https://t.me/infomphl/7\">Подать заявку</a>"
-    await call.message.edit_text(text, reply_markup=back_keyboard(), disable_web_page_preview=True)
+            block = (
+                f"<b>🏒 КОМАНДА №{number}</b>\n"
+                "  └ <i>Свободное место</i>"
+            )
+        captain_blocks.append(block)
+
+    text = (
+        "<b>🏆 КАПИТАНЫ И КОМАНДЫ MPHL</b>\n"
+        "<i>Официальный список команд и их капитанов</i>\n\n"
+        + "\n\n━━━━━━━━━━━━━━\n\n".join(captain_blocks)
+        + "\n\n━━━━━━━━━━━━━━\n"
+        + '📝 <a href="https://t.me/infomphl/7">Подать заявку на участие</a>'
+    )
+    await call.message.edit_text(
+        text,
+        reply_markup=back_keyboard(),
+        disable_web_page_preview=True,
+    )
 
 
 # =====================================================
