@@ -43,6 +43,7 @@ if not OWNER_ID or not OWNER_ID.isdigit():
 
 OWNER_ID = int(OWNER_ID)
 
+# База данных в /app/data для Bothost
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "mphl_bot.db"
@@ -257,6 +258,7 @@ def valid_telegram_link(link: str):
 
 
 def update_stats(match_name: str, winner: str):
+    """Обновляет статистику в team_stats при добавлении итога."""
     teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
     if len(teams) != 2:
         return
@@ -290,8 +292,14 @@ def main_menu_keyboard(user_id: int, username: str | None = None):
     builder.button(text="🏆 Топ - команды", callback_data="top_teams")
     if is_admin(user_id, username):
         builder.button(text="⚙️ Админ-панель", callback_data="admin_panel")
-    builder.adjust(1)
+    builder.adjust(2)
     return builder.as_markup()
+
+
+def cancel_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]]
+    )
 
 
 def back_keyboard():
@@ -377,8 +385,18 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.message(Command("cancel"))
 async def cancel_handler(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Действие отменено.")
+    await message.answer("❌ Действие отменено.", reply_markup=cancel_keyboard())
     await show_main_menu(message)
+
+
+@dp.callback_query(F.data == "cancel_action")
+async def cancel_action_callback(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.answer("Действие отменено.")
+    await call.message.edit_text(
+        "❌ <b>Действие отменено.</b>\n\nВы вернулись в главное меню.",
+        reply_markup=main_menu_keyboard(call.from_user.id, call.from_user.username)
+    )
 
 
 # =====================================================
@@ -571,7 +589,7 @@ async def admin_panel(call: CallbackQuery):
         builder.button(text="📋 История жалоб", callback_data="complaint_history")
         
     builder.button(text="⬅️ В главное меню", callback_data="home")
-    builder.adjust(1)
+    builder.adjust(2)
     await call.answer()
     await call.message.edit_text(
         "⚙️ <b>Панель администрации MPHL</b>\n\nВыберите действие:",
@@ -640,7 +658,7 @@ async def add_game_start(call: CallbackQuery, state: FSMContext):
         "🎮 <b>Добавление игры</b>\n\n"
         "Шаг 1. Введите, кто против кого играет (например: Барыс vs Адмирал):\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(AddGameForm.waiting_for_match)
 async def add_game_match(message: Message, state: FSMContext):
@@ -649,11 +667,11 @@ async def add_game_match(message: Message, state: FSMContext):
         return
     match = (message.text or "").strip()
     if not match or len(match) > 100:
-        await message.answer("❌ Введите корректное название матча (до 100 символов).")
+        await message.answer("❌ Введите корректное название матча (до 100 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(game_match=match)
     await state.set_state(AddGameForm.waiting_for_datetime)
-    await message.answer("Шаг 2. Введите дату и время игры (например: 12.11.2026 16:00):")
+    await message.answer("Шаг 2. Введите дату и время игры (например: 12.11.2026 16:00):", reply_markup=cancel_keyboard())
 
 @dp.message(AddGameForm.waiting_for_datetime)
 async def add_game_datetime(message: Message, state: FSMContext):
@@ -662,11 +680,11 @@ async def add_game_datetime(message: Message, state: FSMContext):
         return
     dt = (message.text or "").strip()
     if not dt or len(dt) > 50:
-        await message.answer("❌ Введите корректную дату и время.")
+        await message.answer("❌ Введите корректную дату и время.", reply_markup=cancel_keyboard())
         return
     await state.update_data(game_datetime=dt)
     await state.set_state(AddGameForm.waiting_for_stream)
-    await message.answer("Шаг 3. Отправьте ссылку на стрим (если есть). Если стрима не будет, напишите «Нет»:")
+    await message.answer("Шаг 3. Отправьте ссылку на стрим (если есть). Если стрима не будет, напишите «Нет»:", reply_markup=cancel_keyboard())
 
 @dp.message(AddGameForm.waiting_for_stream)
 async def add_game_stream(message: Message, state: FSMContext):
@@ -677,7 +695,7 @@ async def add_game_stream(message: Message, state: FSMContext):
     if stream.lower() in {"нет", "no", "без стрима"}:
         stream = None
     elif not stream.startswith("http"):
-        await message.answer("❌ Некорректная ссылка. Отправьте ссылку (начинается с http) или напишите «Нет».")
+        await message.answer("❌ Некорректная ссылка. Отправьте ссылку (начинается с http) или напишите «Нет».", reply_markup=cancel_keyboard())
         return
 
     data = await state.get_data()
@@ -688,7 +706,7 @@ async def add_game_stream(message: Message, state: FSMContext):
         """, (data["game_match"], data["game_datetime"], stream, datetime.now().strftime("%d.%m.%Y %H:%M")))
 
     await state.clear()
-    await message.answer("✅ Игра добавлена.")
+    await message.answer("✅ Игра добавлена.", reply_markup=cancel_keyboard())
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
 
 
@@ -704,7 +722,7 @@ async def delete_game_start(call: CallbackQuery, state: FSMContext):
         "🗑 <b>Удаление игры</b>\n\n"
         "Введите название игры, которую хотите удалить (например: Барыс vs Адмирал):\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(DeleteGameForm.waiting_for_match)
 async def delete_game_match(message: Message, state: FSMContext):
@@ -716,9 +734,9 @@ async def delete_game_match(message: Message, state: FSMContext):
         cursor = db.execute("DELETE FROM games WHERE match_name = ?", (match,))
     
     if cursor.rowcount == 0:
-        await message.answer("❌ Игра с таким названием не найдена.")
+        await message.answer("❌ Игра с таким названием не найдена.", reply_markup=cancel_keyboard())
     else:
-        await message.answer("✅ Игра удалена.")
+        await message.answer("✅ Игра удалена.", reply_markup=cancel_keyboard())
     
     await state.clear()
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
@@ -740,7 +758,7 @@ async def add_result_start(call: CallbackQuery, state: FSMContext):
         "📊 <b>Добавление итогов</b>\n\n"
         "Шаг 1. Введите дату и время игры (например: 12.11.2026 16:00):\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(AddResultForm.waiting_for_datetime)
 async def add_result_datetime(message: Message, state: FSMContext):
@@ -749,11 +767,11 @@ async def add_result_datetime(message: Message, state: FSMContext):
         return
     dt = (message.text or "").strip()
     if not dt or len(dt) > 50:
-        await message.answer("❌ Введите корректную дату и время.")
+        await message.answer("❌ Введите корректную дату и время.", reply_markup=cancel_keyboard())
         return
     await state.update_data(result_datetime=dt)
     await state.set_state(AddResultForm.waiting_for_match)
-    await message.answer("Шаг 2. Введите название матча (например: Барыс vs Адмирал):")
+    await message.answer("Шаг 2. Введите название матча (например: Барыс vs Адмирал):", reply_markup=cancel_keyboard())
 
 @dp.message(AddResultForm.waiting_for_match)
 async def add_result_match(message: Message, state: FSMContext):
@@ -762,11 +780,11 @@ async def add_result_match(message: Message, state: FSMContext):
         return
     match = (message.text or "").strip()
     if not match or len(match) > 100:
-        await message.answer("❌ Введите корректное название матча.")
+        await message.answer("❌ Введите корректное название матча.", reply_markup=cancel_keyboard())
         return
     await state.update_data(result_match=match)
     await state.set_state(AddResultForm.waiting_for_score)
-    await message.answer("Шаг 3. Введите счет (например: 3:0):")
+    await message.answer("Шаг 3. Введите счет (например: 3:0):", reply_markup=cancel_keyboard())
 
 @dp.message(AddResultForm.waiting_for_score)
 async def add_result_score(message: Message, state: FSMContext):
@@ -775,11 +793,11 @@ async def add_result_score(message: Message, state: FSMContext):
         return
     score = (message.text or "").strip()
     if not score or len(score) > 20:
-        await message.answer("❌ Введите корректный счет.")
+        await message.answer("❌ Введите корректный счет.", reply_markup=cancel_keyboard())
         return
     await state.update_data(result_score=score)
     await state.set_state(AddResultForm.waiting_for_winner)
-    await message.answer("Шаг 4. Введите название победившей команды (например: Барыс):")
+    await message.answer("Шаг 4. Введите название победившей команды (например: Барыс):", reply_markup=cancel_keyboard())
 
 @dp.message(AddResultForm.waiting_for_winner)
 async def add_result_winner(message: Message, state: FSMContext):
@@ -788,7 +806,7 @@ async def add_result_winner(message: Message, state: FSMContext):
         return
     winner = (message.text or "").strip()
     if not winner or len(winner) > 100:
-        await message.answer("❌ Введите корректное название команды.")
+        await message.answer("❌ Введите корректное название команды.", reply_markup=cancel_keyboard())
         return
 
     data = await state.get_data()
@@ -801,7 +819,7 @@ async def add_result_winner(message: Message, state: FSMContext):
     update_stats(data["result_match"], winner)
 
     await state.clear()
-    await message.answer("✅ Итоги добавлены, статистика обновлена.")
+    await message.answer("✅ Итоги добавлены, статистика обновлена.", reply_markup=cancel_keyboard())
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
 
 
@@ -817,7 +835,7 @@ async def delete_result_start(call: CallbackQuery, state: FSMContext):
         "🗑 <b>Удаление итогов</b>\n\n"
         "Введите название матча, итоги которого хотите удалить (например: Барыс vs Адмирал):\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(DeleteResultForm.waiting_for_match)
 async def delete_result_match(message: Message, state: FSMContext):
@@ -829,9 +847,9 @@ async def delete_result_match(message: Message, state: FSMContext):
         cursor = db.execute("DELETE FROM results WHERE match_name = ?", (match,))
     
     if cursor.rowcount == 0:
-        await message.answer("❌ Итоги с таким названием не найдены.")
+        await message.answer("❌ Итоги с таким названием не найдены.", reply_markup=cancel_keyboard())
     else:
-        await message.answer("✅ Итоги удалены. Статистика в топ-командах осталась без изменений.")
+        await message.answer("✅ Итоги удалены. Статистика в топ-командах осталась без изменений.", reply_markup=cancel_keyboard())
     
     await state.clear()
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
@@ -858,7 +876,7 @@ async def add_captain_start(call: CallbackQuery, state: FSMContext):
         "➕ <b>Добавление капитана</b>\n\n"
         "1. Введите никнейм и номер капитана.\n\n"
         "Пример: <code>h1zEr #99</code>\n\nДля отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(AddCaptainForm.waiting_for_name)
 async def add_captain_name(message: Message, state: FSMContext):
@@ -867,11 +885,11 @@ async def add_captain_name(message: Message, state: FSMContext):
         return
     name = (message.text or "").strip()
     if not name or len(name) > 100:
-        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(captain_name=name)
     await state.set_state(AddCaptainForm.waiting_for_team)
-    await message.answer("2. Введите название команды.\n\nПример: <code>Адмирал</code>")
+    await message.answer("2. Введите название команды.\n\nПример: <code>Адмирал</code>", reply_markup=cancel_keyboard())
 
 @dp.message(AddCaptainForm.waiting_for_team)
 async def add_captain_team(message: Message, state: FSMContext):
@@ -880,11 +898,11 @@ async def add_captain_team(message: Message, state: FSMContext):
         return
     team = (message.text or "").strip()
     if not team or len(team) > 100:
-        await message.answer("❌ Введите корректное название команды.")
+        await message.answer("❌ Введите корректное название команды.", reply_markup=cancel_keyboard())
         return
     await state.update_data(captain_team=team)
     await state.set_state(AddCaptainForm.waiting_for_telegram)
-    await message.answer("3. Отправьте ссылку на Telegram капитана.\n\nПример: <code>https://t.me/h1zEr54</code>")
+    await message.answer("3. Отправьте ссылку на Telegram капитана.\n\nПример: <code>https://t.me/h1zEr54</code>", reply_markup=cancel_keyboard())
 
 @dp.message(AddCaptainForm.waiting_for_telegram)
 async def add_captain_telegram(message: Message, state: FSMContext):
@@ -893,18 +911,18 @@ async def add_captain_telegram(message: Message, state: FSMContext):
         return
     telegram = (message.text or "").strip()
     if not valid_telegram_link(telegram):
-        await message.answer("❌ Некорректная ссылка.\nИспользуйте формат https://t.me/username")
+        await message.answer("❌ Некорректная ссылка.\nИспользуйте формат https://t.me/username", reply_markup=cancel_keyboard())
         return
     data = await state.get_data()
     with get_db() as db:
         count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
         if count >= 5:
-            await message.answer("❌ Все пять мест капитанов уже заняты.")
+            await message.answer("❌ Все пять мест капитанов уже заняты.", reply_markup=cancel_keyboard())
             await state.clear()
             return
         exists = db.execute("SELECT id FROM captains WHERE team = ?", (data["captain_team"],)).fetchone()
         if exists:
-            await message.answer("❌ Эта команда уже добавлена. Введите другое название команды.")
+            await message.answer("❌ Эта команда уже добавлена. Введите другое название команды.", reply_markup=cancel_keyboard())
             return
         db.execute("""
             INSERT INTO captains (name, team, telegram, added_by, created_at)
@@ -919,7 +937,7 @@ async def add_captain_telegram(message: Message, state: FSMContext):
         f"👤 Никнейм: {escape(data['captain_name'])}\n"
         f"🏆 Команда: {escape(data['captain_team'])}\n"
         f"🔗 Telegram: <a href=\"{escape(telegram)}\">Открыть профиль</a>"
-    )
+    , reply_markup=cancel_keyboard())
     await message.answer(
         "⚙️ <b>Панель администрации</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -955,7 +973,7 @@ async def remove_captain_start(call: CallbackQuery):
             callback_data=f"remove_captain_confirm:{captain['id']}"
         )
     builder.button(text="⬅️ Назад в админ-панель", callback_data="admin_panel")
-    builder.adjust(1)
+    builder.adjust(2)
     await call.message.edit_text(
         "➖ <b>Снятие капитана</b>\n\nВыберите капитана, которого нужно снять:",
         reply_markup=builder.as_markup()
@@ -1029,40 +1047,40 @@ async def unban_start(call: CallbackQuery, state: FSMContext):
         "🔓 <b>Заявка на разбан</b>\n\n"
         "Шаг 1. Введите ваш SteamID64 (17 цифр, начинается на 765...):\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(UnbanForm.waiting_for_steamid)
 async def unban_steamid(message: Message, state: FSMContext):
     steam_id = (message.text or "").strip()
     if not re.fullmatch(r"765\d{14}", steam_id):
-        await message.answer("❌ Неверный формат SteamID64. Он должен начинаться с 765 и содержать 17 цифр.")
+        await message.answer("❌ Неверный формат SteamID64. Он должен начинаться с 765 и содержать 17 цифр.", reply_markup=cancel_keyboard())
         return
     await state.update_data(unban_steamid=steam_id)
     await state.set_state(UnbanForm.waiting_for_reason)
-    await message.answer("Шаг 2. Опишите суть бана (за что забанили):")
+    await message.answer("Шаг 2. Опишите суть бана (за что забанили):", reply_markup=cancel_keyboard())
 
 @dp.message(UnbanForm.waiting_for_reason)
 async def unban_reason(message: Message, state: FSMContext):
     reason = (message.text or "").strip()
     if not reason or len(reason) > 1000:
-        await message.answer("❌ Опишите причину (до 1000 символов).")
+        await message.answer("❌ Опишите причину (до 1000 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(unban_reason=reason)
     await state.set_state(UnbanForm.waiting_for_date)
-    await message.answer("Шаг 3. Введите дату выдачи бана (например, 12.11.2026):")
+    await message.answer("Шаг 3. Введите дату выдачи бана (например, 12.11.2026):", reply_markup=cancel_keyboard())
 
 @dp.message(UnbanForm.waiting_for_date)
 async def unban_date(message: Message, state: FSMContext):
     ban_date = (message.text or "").strip()
     if not ban_date or len(ban_date) > 50:
-        await message.answer("❌ Введите корректную дату.")
+        await message.answer("❌ Введите корректную дату.", reply_markup=cancel_keyboard())
         return
     await state.update_data(unban_date=ban_date)
     await state.set_state(UnbanForm.waiting_for_media)
     await message.answer(
         "Шаг 4. Прикрепите доказательства (фото/видео бана), если есть.\n"
         "Когда закончите, напишите «Готово». Если доказательств нет — «Пропустить»."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(UnbanForm.waiting_for_media)
 async def unban_media(message: Message, state: FSMContext):
@@ -1072,7 +1090,7 @@ async def unban_media(message: Message, state: FSMContext):
     command = (message.text or "").strip().lower()
     if command in {"готово", "гатово", "done", "завершить"}:
         if not media_items:
-            await message.answer("Вы не прикрепили файлы. Напишите «Пропустить», если их нет.")
+            await message.answer("Вы не прикрепили файлы. Напишите «Пропустить», если их нет.", reply_markup=cancel_keyboard())
             return
         await _send_unban_request(message, state, media_items=media_items)
         return
@@ -1098,10 +1116,10 @@ async def unban_media(message: Message, state: FSMContext):
             media_items.append((media_type, media_file_id))
             await state.update_data(unban_media_items=media_items)
             count = len(media_items)
-        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».")
+        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».", reply_markup=cancel_keyboard())
         return
 
-    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».")
+    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».", reply_markup=cancel_keyboard())
 
 async def _send_unban_request(message: Message, state: FSMContext, media_items: list | None = None):
     data = await state.get_data()
@@ -1157,7 +1175,7 @@ async def _send_unban_request(message: Message, state: FSMContext, media_items: 
     await message.answer(
         f"✅ <b>Заявка на разбан №{request_id} отправлена!</b>\n\n"
         "Владелец рассмотрит её в ближайшее время."
-    )
+    , reply_markup=cancel_keyboard())
     await show_main_menu(message)
 
 
@@ -1174,40 +1192,40 @@ async def complaint_start(call: CallbackQuery, state: FSMContext):
         "⚠️ <b>Жалоба на администрацию</b>\n\n"
         "Шаг 1. Введите ваш игровой никнейм:\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(ComplaintForm.waiting_for_nickname)
 async def complaint_nickname(message: Message, state: FSMContext):
     nickname = (message.text or "").strip()
     if not nickname or len(nickname) > 100:
-        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(complaint_nickname=nickname)
     await state.set_state(ComplaintForm.waiting_for_admin_nickname)
-    await message.answer("Шаг 2. Введите никнейм администратора, на которого жалуетесь:")
+    await message.answer("Шаг 2. Введите никнейм администратора, на которого жалуетесь:", reply_markup=cancel_keyboard())
 
 @dp.message(ComplaintForm.waiting_for_admin_nickname)
 async def complaint_admin_nickname(message: Message, state: FSMContext):
     admin_nickname = (message.text or "").strip()
     if not admin_nickname or len(admin_nickname) > 100:
-        await message.answer("❌ Введите корректный никнейм администратора.")
+        await message.answer("❌ Введите корректный никнейм администратора.", reply_markup=cancel_keyboard())
         return
     await state.update_data(complaint_admin_nickname=admin_nickname)
     await state.set_state(ComplaintForm.waiting_for_violation)
-    await message.answer("Шаг 3. Опишите, что нарушил администратор (суть проблемы):")
+    await message.answer("Шаг 3. Опишите, что нарушил администратор (суть проблемы):", reply_markup=cancel_keyboard())
 
 @dp.message(ComplaintForm.waiting_for_violation)
 async def complaint_violation(message: Message, state: FSMContext):
     violation = (message.text or "").strip()
     if not violation or len(violation) > 3500:
-        await message.answer("❌ Опишите нарушение (до 3500 символов).")
+        await message.answer("❌ Опишите нарушение (до 3500 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(complaint_violation=violation)
     await state.set_state(ComplaintForm.waiting_for_proof)
     await message.answer(
         "Шаг 4. Прикрепите доказательства (фото/видео/документы).\n"
         "Можно прикрепить до 4-х штук. Когда закончите, напишите «Готово». Если доказательств нет — «Пропустить»."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(ComplaintForm.waiting_for_proof)
 async def complaint_proof(message: Message, state: FSMContext):
@@ -1218,7 +1236,7 @@ async def complaint_proof(message: Message, state: FSMContext):
     command = (message.text or "").strip().lower()
     if command in {"готово", "гатово", "done", "завершить"}:
         if not media_items:
-            await message.answer("Вы ещё не прикрепили доказательства. Отправьте фото или напишите «Пропустить».")
+            await message.answer("Вы ещё не прикрепили доказательства. Отправьте фото или напишите «Пропустить».", reply_markup=cancel_keyboard())
             return
         await _send_complaint_to_owner(message, state, media_items=media_items, media_refs=media_refs)
         return
@@ -1244,17 +1262,17 @@ async def complaint_proof(message: Message, state: FSMContext):
             media_refs = list(latest.get("complaint_media_refs", []))
             
             if len(media_items) >= 4:
-                await message.answer("❌ К сожалению, я не принимаю больше 4-х фотографий за раз.")
+                await message.answer("❌ К сожалению, я не принимаю больше 4-х фотографий за раз.", reply_markup=cancel_keyboard())
                 return
 
             media_items.append((media_type, media_file_id))
             media_refs.append((message.chat.id, message.message_id))
             await state.update_data(complaint_media_items=media_items, complaint_media_refs=media_refs)
             count = len(media_items)
-        await message.answer(f"📎 Доказательство добавлено ({count}/4). Можете отправить ещё или написать «Готово».")
+        await message.answer(f"📎 Доказательство добавлено ({count}/4). Можете отправить ещё или написать «Готово».", reply_markup=cancel_keyboard())
         return
 
-    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».")
+    await message.answer("Прикрепите фото/видео/документ. Когда закончите, напишите «Готово».", reply_markup=cancel_keyboard())
 
 
 async def _send_complaint_to_owner(message: Message, state: FSMContext, media_items: list | None = None, media_refs: list | None = None):
@@ -1322,7 +1340,7 @@ async def _send_complaint_to_owner(message: Message, state: FSMContext, media_it
     await message.answer(
         f"✅ <b>Жалоба №{complaint_id} успешно отправлена!</b>\n\n"
         "Администрация рассмотрит её в ближайшее время."
-    )
+    , reply_markup=cancel_keyboard())
     await show_main_menu(message)
 
 
@@ -1357,7 +1375,7 @@ async def complaint_decision(call: CallbackQuery):
     await call.answer("Статус обновлён.")
     try:
         await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.")
+        await call.message.answer(f"✅ Жалоба №{complaint_id} {result}.", reply_markup=cancel_keyboard())
     except TelegramAPIError:
         logger.exception("Не удалось обновить сообщение жалобы")
     if complaint:
@@ -1380,30 +1398,30 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
         "💡 <b>Форма подачи заявок по улучшению</b>\n\n"
         "Шаг 1. Введите ваш игровой никнейм:\n\n"
         "Для отмены напишите /cancel."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionForm.waiting_for_nickname)
 async def suggestion_nickname(message: Message, state: FSMContext):
     nickname = (message.text or "").strip()
     if not nickname or len(nickname) > 100:
-        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(suggestion_nickname=nickname)
     await state.set_state(SuggestionForm.waiting_for_text)
-    await message.answer("Шаг 2. Опишите суть вашего предложения (до 3500 символов):")
+    await message.answer("Шаг 2. Опишите суть вашего предложения (до 3500 символов):", reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionForm.waiting_for_text)
 async def suggestion_text(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text or len(text) > 3500:
-        await message.answer("❌ Отправьте текст предложения (до 3500 символов).")
+        await message.answer("❌ Отправьте текст предложения (до 3500 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(suggestion_text=text)
     await state.set_state(SuggestionForm.waiting_for_media)
     await message.answer(
         "Шаг 3. Прикрепите фото/видео/документы (если есть).\n"
         "Когда закончите, напишите «Готово». Если вложений нет — «Пропустить»."
-    )
+    , reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionForm.waiting_for_media)
 async def suggestion_media(message: Message, state: FSMContext):
@@ -1414,7 +1432,7 @@ async def suggestion_media(message: Message, state: FSMContext):
     command = (message.text or "").strip().lower()
     if command in {"готово", "гатово", "done", "завершить"}:
         if not media_items:
-            await message.answer("Вы ещё не прикрепили файлы. Отправьте фото/видео или напишите «Пропустить».")
+            await message.answer("Вы ещё не прикрепили файлы. Отправьте фото/видео или напишите «Пропустить».", reply_markup=cancel_keyboard())
             return
         await submit_suggestion(message, state, media_items=media_items, media_refs=media_refs)
         return
@@ -1442,10 +1460,10 @@ async def suggestion_media(message: Message, state: FSMContext):
             media_refs.append((message.chat.id, message.message_id))
             await state.update_data(suggestion_media_items=media_items, suggestion_media_refs=media_refs)
             count = len(media_items)
-        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».")
+        await message.answer(f"📎 Файл добавлен ({count}). Можете отправить ещё или написать «Готово».", reply_markup=cancel_keyboard())
         return
 
-    await message.answer("Прикрепите фото, видео или документ. Когда закончите, напишите «Готово».")
+    await message.answer("Прикрепите фото, видео или документ. Когда закончите, напишите «Готово».", reply_markup=cancel_keyboard())
 
 
 async def submit_suggestion(message: Message, state: FSMContext, media_items: list | None = None, media_refs: list | None = None):
@@ -1523,7 +1541,7 @@ async def submit_suggestion(message: Message, state: FSMContext, media_items: li
     )
     if not delivered:
         result += "\n\n⚠️ Заявка сохранена, но уведомления администраторам не доставлены."
-    await message.answer(result)
+    await message.answer(result, reply_markup=cancel_keyboard())
     await show_main_menu(message)
 
 
@@ -1551,7 +1569,7 @@ async def suggestion_reply_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(SuggestionReplyForm.waiting_for_reply)
     await state.update_data(suggestion_id=suggestion_id, suggestion_user_id=suggestion["user_id"])
     await call.answer()
-    await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel.")
+    await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel.", reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionReplyForm.waiting_for_reply)
 async def suggestion_reply_send(message: Message, state: FSMContext):
@@ -1560,7 +1578,7 @@ async def suggestion_reply_send(message: Message, state: FSMContext):
         return
     reply_text = (message.text or message.caption or "").strip()
     if not reply_text and not (message.photo or message.video or message.document):
-        await message.answer("Отправьте текст или медиафайл с подписью.")
+        await message.answer("Отправьте текст или медиафайл с подписью.", reply_markup=cancel_keyboard())
         return
     data = await state.get_data()
     user_id = data["suggestion_user_id"]
@@ -1577,13 +1595,13 @@ async def suggestion_reply_send(message: Message, state: FSMContext):
             await bot.send_document(user_id, message.document.file_id, caption=header)
     except TelegramAPIError:
         logger.exception("Не удалось отправить ответ автору предложения")
-        await message.answer("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
+        await message.answer("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.", reply_markup=cancel_keyboard())
         await state.clear()
         return
     with get_db() as db:
         db.execute("UPDATE suggestions SET status = 'answered' WHERE id = ?", (suggestion_id,))
     await state.clear()
-    await message.answer(f"✅ Ответ на заявку №{suggestion_id} отправлен.")
+    await message.answer(f"✅ Ответ на заявку №{suggestion_id} отправлен.", reply_markup=cancel_keyboard())
 
 
 # =====================================================
@@ -1627,7 +1645,7 @@ async def manage_admins(call: CallbackQuery):
     builder.button(text="➕ Добавить администратора", callback_data="add_admin")
     builder.button(text="➖ Удалить администратора", callback_data="remove_admin")
     builder.button(text="⬅️ Назад", callback_data="admin_panel")
-    builder.adjust(1)
+    builder.adjust(2)
     await call.answer()
     await call.message.edit_text("👥 <b>Управление администрацией</b>", reply_markup=builder.as_markup())
 
@@ -1642,7 +1660,7 @@ async def add_admin_start(call: CallbackQuery, state: FSMContext):
     for level in LEVELS:
         builder.button(text=level, callback_data=f"level:{level}")
     builder.button(text="⬅️ Назад", callback_data="manage_admins")
-    builder.adjust(1)
+    builder.adjust(2)
     
     await state.set_state(AddAdminForm.waiting_for_level)
     await call.answer()
@@ -1670,7 +1688,7 @@ async def add_admin_level(call: CallbackQuery, state: FSMContext):
     for position in POSITIONS:
         builder.button(text=position, callback_data=f"position:{position}")
     builder.button(text="⬅️ Назад", callback_data="add_admin")
-    builder.adjust(1)
+    builder.adjust(2)
     
     await state.set_state(AddAdminForm.waiting_for_position)
     await call.answer()
@@ -1695,7 +1713,7 @@ async def add_admin_position(call: CallbackQuery, state: FSMContext):
     await state.update_data(position=position)
     await state.set_state(AddAdminForm.waiting_for_name)
     await call.answer()
-    await call.message.answer("Шаг 3. Введите Никнейм + номер (например: h1zEr #99):")
+    await call.message.answer("Шаг 3. Введите Никнейм + номер (например: h1zEr #99):", reply_markup=cancel_keyboard())
 
 
 @dp.message(AddAdminForm.waiting_for_name)
@@ -1705,11 +1723,11 @@ async def add_admin_name(message: Message, state: FSMContext):
         return
     name = (message.text or "").strip()
     if not name or len(name) > 100:
-        await message.answer("❌ Введите корректный никнейм (до 100 символов).")
+        await message.answer("❌ Введите корректный никнейм (до 100 символов).", reply_markup=cancel_keyboard())
         return
     await state.update_data(name=name)
     await state.set_state(AddAdminForm.waiting_for_link)
-    await message.answer("Шаг 4. Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>")
+    await message.answer("Шаг 4. Отправьте ссылку Telegram в формате:\n<code>https://t.me/username</code>", reply_markup=cancel_keyboard())
 
 
 @dp.message(AddAdminForm.waiting_for_link)
@@ -1719,7 +1737,7 @@ async def add_admin_link(message: Message, state: FSMContext):
         return
     link = (message.text or "").strip()
     if not valid_telegram_link(link):
-        await message.answer("❌ Некорректная ссылка. Используйте https://t.me/username")
+        await message.answer("❌ Некорректная ссылка. Используйте https://t.me/username", reply_markup=cancel_keyboard())
         return
     
     data = await state.get_data()
@@ -1732,7 +1750,7 @@ async def add_admin_link(message: Message, state: FSMContext):
         )
     
     await state.clear()
-    await message.answer("✅ Администратор добавлен.")
+    await message.answer("✅ Администратор добавлен.", reply_markup=cancel_keyboard())
     await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
 
 
@@ -1751,7 +1769,7 @@ async def remove_admin_start(call: CallbackQuery):
     for admin in admins:
         builder.button(text=f"❌ {admin['name']} — {admin['position']}", callback_data=f"delete_admin:{admin['id']}")
     builder.button(text="⬅️ Назад", callback_data="manage_admins")
-    builder.adjust(1)
+    builder.adjust(2)
     await call.message.edit_text("➖ <b>Выберите администратора для удаления:</b>", reply_markup=builder.as_markup())
 
 
