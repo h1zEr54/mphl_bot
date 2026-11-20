@@ -535,34 +535,50 @@ async def admins_callback(call: CallbackQuery):
 
     admin_dict = {}
     for admin in admins:
-        pos = admin['position']
-        if pos not in admin_dict:
-            admin_dict[pos] = []
-        admin_dict[pos].append((admin['name'], admin['telegram']))
+        admin_dict.setdefault(admin["position"], []).append(admin)
 
-    def fmt(pos_name):
-        if pos_name in admin_dict and admin_dict[pos_name]:
-            name, link = admin_dict[pos_name][0]
-            return f"{escape(name)} | {escape(link)}"
-        return "Свободно"
+    def person_line(admin):
+        name = escape(admin["name"])
+        link = (admin["telegram"] or "").strip()
+        # Ссылки проверяются при добавлении; дополнительно ограничиваем схему для HTML.
+        if re.match(r"^https?://", link, flags=re.IGNORECASE):
+            return f'  ├ <a href="{escape(link)}">{name} ↗</a>'
+        return f"  ├ {name}"
 
+    def role_block(position, label=None):
+        people = admin_dict.get(position, [])
+        title = escape(label or position)
+        if not people:
+            return f"<b>{title}</b>\n  └ <i>Вакантно</i>"
+        lines = [f"<b>{title}</b>"]
+        lines.extend(person_line(person) for person in people)
+        return "\n".join(lines)
+
+    sections = [
+        "<b>🏆 ВЫСШАЯ АДМИНИСТРАЦИЯ</b>\n\n" + "\n\n".join([
+            role_block("Владелец лиги"),
+            role_block("Главный администратор"),
+            role_block("Главный судья"),
+        ]),
+        "<b>⚙️ СТАРШАЯ АДМИНИСТРАЦИЯ</b>\n\n" + "\n\n".join([
+            role_block("Зам.главного администратора", "Заместитель главного администратора"),
+            role_block("Зам.главного судьи", "Заместитель главного судьи"),
+            role_block("Технический специалист"),
+            role_block("Специалист по соц сетям", "Специалист по социальным сетям"),
+        ]),
+        "<b>🛡 АДМИНИСТРАЦИЯ</b>\n\n" + "\n\n".join([
+            role_block("Судья 1", "Судья №1"),
+            role_block("Судья 2", "Судья №2"),
+            role_block("Судья 3", "Судья №3"),
+        ]),
+    ]
     text = (
-        "<b>Высшая администрация</b>\n\n"
-        f"Владелец лиги - {fmt('Владелец лиги')}\n"
-        f"Главный администратор - {fmt('Главный администратор')}\n"
-        f"Главный судья - {fmt('Главный судья')}\n\n"
-        "<b>Старшая администрация</b>\n\n"
-        f"Зам.главного администратора - {fmt('Зам.главного администратора')}\n"
-        f"Зам.главного судьи - {fmt('Зам.главного судьи')}\n"
-        f"Технический специалист - {fmt('Технический специалист')}\n"
-        f"Специалист по соц сетям - {fmt('Специалист по соц сетям')}\n\n"
-        "<b>Администрация</b>\n\n"
-        f"Судья - {fmt('Судья 1')}\n"
-        f"Судья - {fmt('Судья 2')}\n"
-        f"Судья - {fmt('Судья 3')}\n\n"
-        "Подать заявку - https://t.me/infomphl/5"
+        "<b>👥 СОСТАВ MPHL</b>\n"
+        "<i>Официальная администрация лиги</i>\n\n"
+        + "\n\n━━━━━━━━━━━━━━\n\n".join(sections)
+        + "\n\n━━━━━━━━━━━━━━\n"
+        + '📝 <a href="https://t.me/infomphl/5">Заявка в администрацию</a>'
     )
-
     await call.message.edit_text(text, reply_markup=back_keyboard(), disable_web_page_preview=True)
 
 
@@ -657,7 +673,7 @@ async def add_game_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "🎮 <b>Добавление игры</b>\n\n"
         "Шаг 1. Введите, кто против кого играет (например: Барыс vs Адмирал):\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(AddGameForm.waiting_for_match)
@@ -721,7 +737,7 @@ async def delete_game_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "🗑 <b>Удаление игры</b>\n\n"
         "Введите название игры, которую хотите удалить (например: Барыс vs Адмирал):\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(DeleteGameForm.waiting_for_match)
@@ -757,7 +773,7 @@ async def add_result_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "📊 <b>Добавление итогов</b>\n\n"
         "Шаг 1. Введите дату и время игры (например: 12.11.2026 16:00):\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(AddResultForm.waiting_for_datetime)
@@ -834,7 +850,7 @@ async def delete_result_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "🗑 <b>Удаление итогов</b>\n\n"
         "Введите название матча, итоги которого хотите удалить (например: Барыс vs Адмирал):\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(DeleteResultForm.waiting_for_match)
@@ -875,7 +891,7 @@ async def add_captain_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "➕ <b>Добавление капитана</b>\n\n"
         "1. Введите никнейм и номер капитана.\n\n"
-        "Пример: <code>h1zEr #99</code>\n\nДля отмены напишите /cancel."
+        "Пример: <code>h1zEr #99</code>"
     , reply_markup=cancel_keyboard())
 
 @dp.message(AddCaptainForm.waiting_for_name)
@@ -1046,7 +1062,7 @@ async def unban_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "🔓 <b>Заявка на разбан</b>\n\n"
         "Шаг 1. Введите ваш SteamID64 (17 цифр, начинается на 765...):\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(UnbanForm.waiting_for_steamid)
@@ -1191,7 +1207,7 @@ async def complaint_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "⚠️ <b>Жалоба на администрацию</b>\n\n"
         "Шаг 1. Введите ваш игровой никнейм:\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(ComplaintForm.waiting_for_nickname)
@@ -1397,7 +1413,7 @@ async def suggestion_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "💡 <b>Форма подачи заявок по улучшению</b>\n\n"
         "Шаг 1. Введите ваш игровой никнейм:\n\n"
-        "Для отмены напишите /cancel."
+        ""
     , reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionForm.waiting_for_nickname)
@@ -1569,7 +1585,7 @@ async def suggestion_reply_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(SuggestionReplyForm.waiting_for_reply)
     await state.update_data(suggestion_id=suggestion_id, suggestion_user_id=suggestion["user_id"])
     await call.answer()
-    await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки. Для отмены — /cancel.", reply_markup=cancel_keyboard())
+    await call.message.answer(f"✉️ Напишите ответ на предложение №{suggestion_id}.\nОтвет отправится автору заявки.", reply_markup=cancel_keyboard())
 
 @dp.message(SuggestionReplyForm.waiting_for_reply)
 async def suggestion_reply_send(message: Message, state: FSMContext):
