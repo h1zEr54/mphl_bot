@@ -910,8 +910,8 @@ async def add_captain_start(call: CallbackQuery, state: FSMContext):
         return
     with get_db() as db:
         count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
-    if count >= 5:
-        await call.answer("Все пять мест капитанов уже заняты.", show_alert=True)
+    if count >= 8:
+        await call.answer("Все восемь мест капитанов уже заняты.", show_alert=True)
         return
     await state.clear()
     await state.set_state(AddCaptainForm.waiting_for_name)
@@ -960,8 +960,8 @@ async def add_captain_telegram(message: Message, state: FSMContext):
     data = await state.get_data()
     with get_db() as db:
         count = db.execute("SELECT COUNT(*) FROM captains").fetchone()[0]
-        if count >= 5:
-            await message.answer("❌ Все пять мест капитанов уже заняты.", reply_markup=cancel_keyboard())
+        if count >= 8:
+            await message.answer("❌ Все восемь мест капитанов уже заняты.", reply_markup=cancel_keyboard())
             await state.clear()
             return
         exists = db.execute("SELECT id FROM captains WHERE team = ?", (data["captain_team"],)).fetchone()
