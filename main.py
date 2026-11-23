@@ -547,42 +547,53 @@ async def results_callback(call: CallbackQuery):
 @dp.callback_query(F.data == "top_teams")
 async def top_teams_callback(call: CallbackQuery):
     await call.answer()
-    
+
     with get_db() as db:
         stats = db.execute("""
             SELECT team_name, games, wins, losses, points
             FROM team_stats
-            ORDER BY points DESC, wins DESC
+            ORDER BY points DESC, wins DESC, team_name COLLATE NOCASE ASC
         """).fetchall()
-    
+
     if not stats:
         await call.message.edit_text(
-            "🏆 <b>Топ команд</b>\n\nПока нет данных для отображения.",
+            "🏆 <b>ТУРНИРНАЯ ТАБЛИЦА MPHL</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "Пока нет данных для отображения.",
             reply_markup=back_keyboard()
         )
         return
 
-    # Находим самую длинную команду, чтобы выровнять таблицу
-    max_len = max(len(row["team_name"]) for row in stats)
-    # Минимальная ширина колонки — 12 символов
-    width = max(max_len, 12)
+    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+    lines = [
+        "🏆 <b>ТУРНИРНАЯ ТАБЛИЦА MPHL</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "<i>Рейтинг команд по набранным очкам</i>",
+        ""
+    ]
 
-    text = "🏆 <b>Топ - команды MPHL</b>\n\n"
-    text += "<pre>"
-    
-    # Заголовок
-    text += f"{'Команда':<{width}} | {'И':>2} | {'В':>2} | {'П':>2} | {'О':>2}\n"
-    text += f"{'-' * width}-|----|----|----|---\n"
-    
-    for row in stats:
-        # Выравниваем по левому краю, но без обрезания
-        team_name = escape(row["team_name"]).ljust(width)
-        text += f"{team_name} | {row['games']:>2} | {row['wins']:>2} | {row['losses']:>2} | {row['points']:>2}\n"
-        
-    text += "</pre>"
-    text += "\n<i>И - Игры, В - Выигрыши, П - Проигрыши, О - Очки</i>"
-    
-    await call.message.edit_text(text, reply_markup=back_keyboard())
+    for index, row in enumerate(stats):
+        place = medals.get(index, f"<b>{index + 1}.</b>")
+        team_name = escape(str(row["team_name"]))
+        points = int(row["points"] or 0)
+        games = int(row["games"] or 0)
+        wins = int(row["wins"] or 0)
+        losses = int(row["losses"] or 0)
+
+        lines.append(f"{place} <b>{team_name}</b>")
+        lines.append(
+            f"   🎯 <b>{points}</b> очк.   │   🏒 {games} игр.\n"
+            f"   ✅ Побед: {wins}   │   ❌ Поражений: {losses}"
+        )
+        if index != len(stats) - 1:
+            lines.append("<i>──────────────────</i>")
+        lines.append("")
+
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━",
+        "<i>Очки — главный показатель рейтинга</i>"
+    ])
+    await call.message.edit_text("\n".join(lines), reply_markup=back_keyboard())
 
 
 # =====================================================
