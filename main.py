@@ -181,6 +181,9 @@ def init_db():
                 points INTEGER DEFAULT 0
             )
         """)
+        result_columns = [row["name"] for row in db.execute("PRAGMA table_info(results)").fetchall()]
+        if "overtime" not in result_columns:
+            db.execute("ALTER TABLE results ADD COLUMN overtime INTEGER NOT NULL DEFAULT 0")
 
         count = db.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
         if count == 0:
@@ -257,27 +260,39 @@ def valid_telegram_link(link: str):
     return bool(re.fullmatch(r"https?://(t\.me|www\.twitch\.tv|twitch\.tv|youtube\.com|youtu\.be)/[A-Za-z0-9_/]+", link.strip()))
 
 
-def update_stats(match_name: str, winner: str):
-    """Обновляет статистику в team_stats при добавлении итога."""
+def update_stats(match_name: str, winner: str, overtime: bool = False):
+    """Обновляет статистику: ОТ — 2 очка победителю и 1 проигравшему; основное время — 1 и 0."""
     teams = re.split(r'\s+vs\.?\s+', match_name, flags=re.IGNORECASE)
     if len(teams) != 2:
         return
-    
+
     team1, team2 = teams[0].strip(), teams[1].strip()
-    
+    if not team1 or not team2:
+        return
+
     with get_db() as db:
-        for team in [team1, team2]:
+        for team in (team1, team2):
             db.execute("INSERT OR IGNORE INTO team_stats (team_name) VALUES (?)", (team,))
-        
-        db.execute("UPDATE team_stats SET games = games + 1 WHERE team_name = ?", (team1,))
-        db.execute("UPDATE team_stats SET games = games + 1 WHERE team_name = ?", (team2,))
-        
-        if winner.lower() == team1.lower():
-            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + 1 WHERE team_name = ?", (team1,))
-            db.execute("UPDATE team_stats SET losses = losses + 1 WHERE team_name = ?", (team2,))
-        elif winner.lower() == team2.lower():
-            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + 1 WHERE team_name = ?", (team2,))
-            db.execute("UPDATE team_stats SET losses = losses + 1 WHERE team_name = ?", (team1,))
+
+        db.execute("UPDATE team_stats SET games = games + 1 WHERE team_name IN (?, ?)", (team1, team2))
+
+        if winner.casefold() == team1.casefold():
+            winner_points, loser_points = (2, 1) if overtime else (1, 0)
+            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + ? WHERE team_name = ?", (winner_points, team1))
+            db.execute("UPDATE team_stats SET losses = losses + 1, points = points + ? WHERE team_name = ?", (loser_points, team2))
+        elif winner.casefold() == team2.casefold():
+            winner_points, loser_points = (2, 1) if overtime else (1, 0)
+            db.execute("UPDATE team_stats SET wins = wins + 1, points = points + ? WHERE team_name = ?", (winner_points, team2))
+            db.execute("UPDATE team_stats SET losses = losses + 1, points = points + ? WHERE team_name = ?", (loser_points, team1))
+
+
+def rebuild_stats_from_results():
+    """Пересчитывает таблицу статистики по сохранённым итогам, включая старые матчи."""
+    with get_db() as db:
+        results = db.execute("SELECT match_name, winner, overtime FROM results ORDER BY id").fetchall()
+        db.execute("DELETE FROM team_stats")
+    for result in results:
+        update_stats(result["match_name"], result["winner"], bool(result["overtime"]))
 
 
 def main_menu_keyboard(user_id: int, username: str | None = None):
@@ -367,6 +382,7 @@ class AddResultForm(StatesGroup):
     waiting_for_match = State()
     waiting_for_score = State()
     waiting_for_winner = State()
+    waiting_for_overtime = State()
 
 class DeleteResultForm(StatesGroup):
     waiting_for_match = State()
@@ -512,7 +528,8 @@ async def results_callback(call: CallbackQuery):
     else:
         text = "📊 <b>Итоги игр MPHL</b>\n\n"
         for res in results:
-            text += f"📅 {escape(res['date_time'])} | {escape(res['match_name'])} | {escape(res['score'])} - победа команды - {escape(res['winner'])}\n\n"
+            match_type = "🏒 Овертайм" if res["overtime"] else "⏱ Основное время"
+            text += f"📅 {escape(res['date_time'])} | {escape(res['match_name'])} | {escape(res['score'])} — победа: {escape(res['winner'])}\n{match_type}\n\n"
     
     await call.message.edit_text(text, reply_markup=back_keyboard())
 
@@ -917,17 +934,70 @@ async def add_result_winner(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    teams = re.split(r"\s+vs\.?\s+", data.get("result_match", ""), flags=re.IGNORECASE)
+    if len(teams) != 2 or winner.casefold() not in [team.strip().casefold() for team in teams]:
+        await message.answer(
+            "❌ Победитель должен совпадать с одной из команд в названии матча.\n"
+            "Введите название победившей команды ещё раз:",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await state.update_data(result_winner=winner)
+    await state.set_state(AddResultForm.waiting_for_overtime)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏱ Победа в основное время", callback_data="result_overtime:0")],
+        [InlineKeyboardButton(text="🏒 Победа в овертайме", callback_data="result_overtime:1")],
+    ])
+    await message.answer(
+        "Шаг 5. <b>Как была одержана победа?</b>\n\n"
+        "⏱ Основное время: победитель — 1 очко, проигравший — 0.\n"
+        "🏒 Овертайм: победитель — 2 очка, проигравший — 1.",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(F.data.startswith("result_overtime:"))
+async def finalize_result_overtime(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    if await state.get_state() != AddResultForm.waiting_for_overtime.state:
+        await call.answer("Этот этап уже завершён или устарел.", show_alert=True)
+        return
+
+    overtime = call.data.endswith(":1")
+    data = await state.get_data()
+    winner = data.get("result_winner", "")
+    if not all(key in data for key in ("result_match", "result_datetime", "result_score")) or not winner:
+        await state.clear()
+        await call.answer("Не удалось получить данные матча. Начните добавление итогов заново.", show_alert=True)
+        return
+
     with get_db() as db:
         db.execute("""
-            INSERT INTO results (match_name, date_time, score, winner, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (data["result_match"], data["result_datetime"], data["result_score"], winner, datetime.now().strftime("%d.%m.%Y %H:%M")))
-    
-    update_stats(data["result_match"], winner)
+            INSERT INTO results (match_name, date_time, score, winner, overtime, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            data["result_match"], data["result_datetime"], data["result_score"], winner,
+            int(overtime), datetime.now().strftime("%d.%m.%Y %H:%M")
+        ))
 
+    update_stats(data["result_match"], winner, overtime)
     await state.clear()
-    await message.answer("✅ Итоги добавлены, статистика обновлена.", reply_markup=cancel_keyboard())
-    await message.answer("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]]))
+    await call.answer("Итоги сохранены!")
+    await call.message.edit_text(
+        "✅ <b>Итоги добавлены!</b>\n\n"
+        f"🏒 {escape(data['result_match'])}\n"
+        f"📊 Счёт: {escape(data['result_score'])}\n"
+        f"🏆 Победитель: {escape(winner)}\n"
+        f"{'Овертайм' if overtime else 'Основное время'}\n\n"
+        f"Начисление очков: {'2 победителю / 1 проигравшему' if overtime else '1 победителю / 0 проигравшему'}.",
+    )
+    await call.message.answer(
+        "⚙️ Админ-панель:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]])
+    )
 
 
 @dp.callback_query(F.data == "delete_result")
@@ -1905,6 +1975,7 @@ async def remove_admin_confirm(call: CallbackQuery):
 
 async def main():
     init_db()
+    rebuild_stats_from_results()
     logger.info("MPHL bot started")
     try:
         await dp.start_polling(bot)
