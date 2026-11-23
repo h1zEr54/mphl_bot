@@ -388,6 +388,12 @@ class DeleteResultForm(StatesGroup):
     waiting_for_match = State()
 
 
+class TableEditForm(StatesGroup):
+    waiting_for_new_team = State()
+    waiting_for_value = State()
+
+
+
 # =====================================================
 # СТАРТ
 # =====================================================
@@ -547,7 +553,6 @@ async def top_teams_callback(call: CallbackQuery):
             SELECT team_name, games, wins, losses, points
             FROM team_stats
             ORDER BY points DESC, wins DESC
-            LIMIT 5
         """).fetchall()
     
     if not stats:
@@ -571,7 +576,7 @@ async def top_teams_callback(call: CallbackQuery):
     
     for row in stats:
         # Выравниваем по левому краю, но без обрезания
-        team_name = row["team_name"].ljust(width)
+        team_name = escape(row["team_name"]).ljust(width)
         text += f"{team_name} | {row['games']:>2} | {row['wins']:>2} | {row['losses']:>2} | {row['points']:>2}\n"
         
     text += "</pre>"
@@ -708,6 +713,7 @@ async def admin_panel(call: CallbackQuery):
     builder.button(text="🗑 Удалить итоги", callback_data="delete_result")
     
     if is_owner(call.from_user.id):
+        builder.button(text="⚙️ Изменение таблиц", callback_data="table_management")
         builder.button(text="🧹 Очистить таблицу", callback_data="clear_table")
         builder.button(text="👥 Управление администрацией", callback_data="manage_admins")
         builder.button(text="📋 История жалоб", callback_data="complaint_history")
@@ -724,6 +730,262 @@ async def admin_panel(call: CallbackQuery):
 # =====================================================
 # ОЧИСТИТЬ ТАБЛИЦУ (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА)
 # =====================================================
+
+
+# =====================================================
+# ИЗМЕНЕНИЕ ТАБЛИЦ (ТОЛЬКО ВЛАДЕЛЕЦ)
+# =====================================================
+
+TABLE_FIELDS = {
+    "games": ("games", "🎮 Всего игр"),
+    "wins": ("wins", "🏆 Победы"),
+    "losses": ("losses", "❌ Поражения"),
+    "points": ("points", "⭐ Очки"),
+}
+
+
+def table_management_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить команду", callback_data="table_add_team")],
+        [InlineKeyboardButton(text="➖ Убрать команду", callback_data="table_remove_team")],
+        [InlineKeyboardButton(text="✏️ Изменить статистику команды", callback_data="table_edit_team")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")],
+    ])
+
+
+def get_table_team_names():
+    with get_db() as db:
+        rows = db.execute("SELECT team_name FROM team_stats ORDER BY team_name COLLATE NOCASE").fetchall()
+    return [row["team_name"] for row in rows]
+
+
+@dp.callback_query(F.data == "table_management")
+async def table_management(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await call.answer()
+    await call.message.edit_text(
+        "⚙️ <b>ИЗМЕНЕНИЕ ТАБЛИЦ MPHL</b>\n\n"
+        "Здесь можно добавлять и удалять команды, а также вручную менять игры, победы, поражения и очки.\n"
+        "Изменения сохраняются в базе данных.",
+        reply_markup=table_management_keyboard()
+    )
+
+
+@dp.callback_query(F.data == "table_add_team")
+async def table_add_team_start(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(TableEditForm.waiting_for_new_team)
+    await call.answer()
+    await call.message.edit_text(
+        "➕ <b>Добавление команды</b>\n\nВведите название новой команды:",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(TableEditForm.waiting_for_new_team)
+async def table_add_team_save(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear()
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 60:
+        await message.answer("❌ Название должно содержать от 1 до 60 символов.", reply_markup=cancel_keyboard())
+        return
+    with get_db() as db:
+        existing = db.execute(
+            "SELECT 1 FROM team_stats WHERE team_name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+        if existing:
+            await message.answer("❌ Такая команда уже есть в таблице. Введите другое название.", reply_markup=cancel_keyboard())
+            return
+        db.execute("INSERT INTO team_stats (team_name, games, wins, losses, points) VALUES (?, 0, 0, 0, 0)", (name,))
+    await state.clear()
+    await message.answer(
+        f"✅ Команда <b>{escape(name)}</b> добавлена в таблицу с нулевой статистикой.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚙️ К изменению таблиц", callback_data="table_management")],
+            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "table_remove_team")
+async def table_remove_team_start(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    names = get_table_team_names()
+    if not names:
+        await call.answer("В таблице пока нет команд.", show_alert=True)
+        return
+    builder = InlineKeyboardBuilder()
+    for index, name in enumerate(names):
+        builder.button(text=f"➖ {name}", callback_data=f"table_remove_select:{index}")
+    builder.button(text="⬅️ Назад", callback_data="table_management")
+    builder.adjust(1)
+    await call.answer()
+    await call.message.edit_text("➖ <b>Выберите команду для удаления из таблицы:</b>", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data.startswith("table_remove_select:"))
+async def table_remove_select(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        index = int(call.data.split(":", 1)[1])
+        names = get_table_team_names()
+        name = names[index]
+    except (ValueError, IndexError):
+        await call.answer("Команда не найдена. Откройте список заново.", show_alert=True)
+        return
+    await state.update_data(table_team_to_remove=name)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data="table_remove_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="table_management")]
+    ])
+    await call.answer()
+    await call.message.edit_text(
+        f"⚠️ Удалить <b>{escape(name)}</b> из текущей таблицы?\n\n"
+        "Будет удалена её строка со статистикой. История матчей в разделе «Итоги игр» останется.",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data == "table_remove_confirm")
+async def table_remove_confirm(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    data = await state.get_data()
+    name = data.get("table_team_to_remove")
+    if not name:
+        await call.answer("Не удалось определить команду.", show_alert=True)
+        return
+    with get_db() as db:
+        cursor = db.execute("DELETE FROM team_stats WHERE team_name = ?", (name,))
+    await state.clear()
+    if cursor.rowcount:
+        answer = f"✅ Команда <b>{escape(name)}</b> удалена из таблицы."
+    else:
+        answer = "Команда уже отсутствует в таблице."
+    await call.answer("Готово.")
+    await call.message.edit_text(answer, reply_markup=table_management_keyboard())
+
+
+@dp.callback_query(F.data == "table_edit_team")
+async def table_edit_team_start(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    names = get_table_team_names()
+    if not names:
+        await call.answer("Сначала добавьте команду в таблицу.", show_alert=True)
+        return
+    builder = InlineKeyboardBuilder()
+    for index, name in enumerate(names):
+        builder.button(text=name, callback_data=f"table_edit_select:{index}")
+    builder.button(text="⬅️ Назад", callback_data="table_management")
+    builder.adjust(1)
+    await call.answer()
+    await call.message.edit_text("✏️ <b>Выберите команду для изменения статистики:</b>", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data.startswith("table_edit_select:"))
+async def table_edit_select(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        index = int(call.data.split(":", 1)[1])
+        names = get_table_team_names()
+        name = names[index]
+    except (ValueError, IndexError):
+        await call.answer("Команда не найдена. Откройте список заново.", show_alert=True)
+        return
+    await state.update_data(table_team_to_edit=name)
+    builder = InlineKeyboardBuilder()
+    for key, (_, label) in TABLE_FIELDS.items():
+        builder.button(text=label, callback_data=f"table_edit_field:{key}")
+    builder.button(text="⬅️ К списку команд", callback_data="table_edit_team")
+    builder.adjust(2)
+    await call.answer()
+    await call.message.edit_text(
+        f"✏️ <b>Редактирование: {escape(name)}</b>\n\nЧто хотите изменить?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("table_edit_field:"))
+async def table_edit_field(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    field = call.data.split(":", 1)[1]
+    if field not in TABLE_FIELDS:
+        await call.answer("Неизвестный параметр.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("table_team_to_edit"):
+        await call.answer("Сначала выберите команду.", show_alert=True)
+        return
+    await state.update_data(table_field=field)
+    await state.set_state(TableEditForm.waiting_for_value)
+    await call.answer()
+    await call.message.edit_text(
+        f"Введите новое значение для параметра «{TABLE_FIELDS[field][1]}» команды "
+        f"<b>{escape(data['table_team_to_edit'])}</b>.\n\n"
+        "Нужно указать целое неотрицательное число:",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(TableEditForm.waiting_for_value)
+async def table_edit_value_save(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear()
+        return
+    raw_value = (message.text or "").strip()
+    if not re.fullmatch(r"\d{1,7}", raw_value):
+        await message.answer("❌ Введите целое число от 0 до 9 999 999.", reply_markup=cancel_keyboard())
+        return
+    value = int(raw_value)
+    data = await state.get_data()
+    team = data.get("table_team_to_edit")
+    field = data.get("table_field")
+    if not team or field not in TABLE_FIELDS:
+        await state.clear()
+        await message.answer("❌ Данные редактирования устарели. Начните заново.")
+        return
+    column = TABLE_FIELDS[field][0]
+    with get_db() as db:
+        cursor = db.execute(f"UPDATE team_stats SET {column} = ? WHERE team_name = ?", (value, team))
+    await state.clear()
+    if cursor.rowcount:
+        result = (
+            f"✅ <b>Статистика обновлена</b>\n\n"
+            f"🏒 Команда: <b>{escape(team)}</b>\n"
+            f"{TABLE_FIELDS[field][1]}: <b>{value}</b>"
+        )
+    else:
+        result = "❌ Команда не найдена в таблице."
+    await message.answer(
+        result,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить ещё", callback_data="table_edit_team")],
+            [InlineKeyboardButton(text="⚙️ К изменению таблиц", callback_data="table_management")],
+            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
+        ])
+    )
+
 
 @dp.callback_query(F.data == "clear_table")
 async def clear_table_start(call: CallbackQuery):
@@ -1975,7 +2237,6 @@ async def remove_admin_confirm(call: CallbackQuery):
 
 async def main():
     init_db()
-    rebuild_stats_from_results()
     logger.info("MPHL bot started")
     try:
         await dp.start_polling(bot)
