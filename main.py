@@ -94,6 +94,22 @@ def init_db():
         columns = [row["name"] for row in db.execute("PRAGMA table_info(admins)").fetchall()]
         if "level" not in columns:
             db.execute("ALTER TABLE admins ADD COLUMN level TEXT NOT NULL DEFAULT 'Администрация'")
+        if "warnings" not in columns:
+            db.execute("ALTER TABLE admins ADD COLUMN warnings INTEGER NOT NULL DEFAULT 0")
+        if "reprimands" not in columns:
+            db.execute("ALTER TABLE admins ADD COLUMN reprimands INTEGER NOT NULL DEFAULT 0")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_discipline_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_admin_id INTEGER,
+                target_name TEXT NOT NULL,
+                target_position TEXT NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                owner_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS complaints (
@@ -414,6 +430,9 @@ class AddCaptainForm(StatesGroup):
     waiting_for_telegram = State()
 
 class CaptainDisciplineForm(StatesGroup):
+    waiting_for_reason = State()
+
+class AdminDisciplineForm(StatesGroup):
     waiting_for_reason = State()
 
 
@@ -965,6 +984,202 @@ async def captain_discipline_apply(message: Message, state: FSMContext):
 
 
 # =====================================================
+# ЗАКРЫТАЯ ТАБЛИЦА АДМИНИСТРАЦИИ И ДИСЦИПЛИНА
+# =====================================================
+
+def admin_discipline_text():
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, position, name, level, warnings, reprimands FROM admins "
+            "WHERE position != 'Владелец лиги' ORDER BY "
+            "CASE level WHEN 'Высшая администрация' THEN 1 WHEN 'Старшая администрация' THEN 2 ELSE 3 END, position COLLATE NOCASE"
+        ).fetchall()
+    lines = [
+        "📋 <b>ТАБЛИЦА АДМИНИСТРАЦИИ MPHL</b>",
+        "<i>Закрытая информация: только для администрации и владельца</i>",
+        ""
+    ]
+    if not rows:
+        return "\n".join(lines + ["Администраторы пока не добавлены."])
+    for row in rows:
+        lines.append(f"🛡 <b>{escape(row['position'])}</b>")
+        lines.append(f"👤 {escape(row['name'])}")
+        lines.append(f"🏷 Уровень: {escape(row['level'])}")
+        lines.append(f"⚠️ Предупреждения: <b>{int(row['warnings'] or 0)}/3</b>")
+        lines.append(f"❗ Выговоры: <b>{int(row['reprimands'] or 0)}</b>")
+        lines.append("━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
+
+def admin_discipline_keyboard(owner: bool):
+    rows = []
+    if owner:
+        rows.extend([
+            [InlineKeyboardButton(text="❗ Выдать выговор администратору", callback_data="admin_staff_action:reprimand_add")],
+            [InlineKeyboardButton(text="⚠️ Выдать предупреждение администратору", callback_data="admin_staff_action:warning_add")],
+            [InlineKeyboardButton(text="➖ Снять предупреждение администратору", callback_data="admin_staff_action:warning_remove")],
+            [InlineKeyboardButton(text="➖ Снять выговор администратору", callback_data="admin_staff_action:reprimand_remove")],
+        ])
+    rows.append([InlineKeyboardButton(text="📋 Обновить таблицу", callback_data="admin_staff_table")])
+    rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "admin_staff_table")
+async def admin_staff_table(call: CallbackQuery):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Раздел доступен только администрации и владельцу.", show_alert=True)
+        return
+    await call.answer()
+    await call.message.edit_text(
+        admin_discipline_text(),
+        reply_markup=admin_discipline_keyboard(is_owner(call.from_user.id))
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_staff_action:"))
+async def admin_staff_choose_action(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Только владелец может изменять дисциплину администрации.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    allowed = {"reprimand_add", "warning_add", "warning_remove", "reprimand_remove"}
+    if action not in allowed:
+        await call.answer("Неизвестное действие.", show_alert=True)
+        return
+    with get_db() as db:
+        staff = db.execute(
+            "SELECT id, name, position FROM admins WHERE position != 'Владелец лиги' ORDER BY position COLLATE NOCASE"
+        ).fetchall()
+    if not staff:
+        await call.answer("В администрации пока никого нет.", show_alert=True)
+        return
+    labels = {
+        "reprimand_add": "выдать выговор",
+        "warning_add": "выдать предупреждение",
+        "warning_remove": "снять предупреждение",
+        "reprimand_remove": "снять выговор",
+    }
+    builder = InlineKeyboardBuilder()
+    for person in staff:
+        builder.button(
+            text=f"{person['name']} — {person['position']}",
+            callback_data=f"admin_staff_select:{action}:{person['id']}"
+        )
+    builder.button(text="⬅️ Назад", callback_data="admin_staff_table")
+    builder.adjust(1)
+    await state.clear()
+    await call.answer()
+    await call.message.edit_text(f"Выберите администратора, которому нужно {labels[action]}:", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data.startswith("admin_staff_select:"))
+async def admin_staff_select(call: CallbackQuery, state: FSMContext):
+    if not is_owner(call.from_user.id):
+        await call.answer("Только владелец может изменять дисциплину администрации.", show_alert=True)
+        return
+    try:
+        _, action, raw_id = call.data.split(":")
+        target_id = int(raw_id)
+    except (ValueError, IndexError):
+        await call.answer("Некорректный запрос.", show_alert=True)
+        return
+    if action not in {"reprimand_add", "warning_add", "warning_remove", "reprimand_remove"}:
+        await call.answer("Некорректное действие.", show_alert=True)
+        return
+    with get_db() as db:
+        person = db.execute(
+            "SELECT name, position FROM admins WHERE id = ? AND position != 'Владелец лиги'", (target_id,)
+        ).fetchone()
+    if not person:
+        await call.answer("Администратор не найден.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(admin_discipline_action=action, target_admin_id=target_id)
+    await state.set_state(AdminDisciplineForm.waiting_for_reason)
+    await call.answer()
+    await call.message.edit_text(
+        f"Выбран: <b>{escape(person['name'])}</b> — <b>{escape(person['position'])}</b>.\n\n"
+        "Укажите причину действия (до 500 символов):",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(AdminDisciplineForm.waiting_for_reason)
+async def admin_staff_apply(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear()
+        await message.answer("Только владелец может изменять дисциплину администрации.")
+        return
+    reason = (message.text or "").strip()
+    if not reason or len(reason) > 500:
+        await message.answer("Введите причину от 1 до 500 символов.", reply_markup=cancel_keyboard())
+        return
+    data = await state.get_data()
+    action = data.get("admin_discipline_action")
+    target_id = data.get("target_admin_id")
+    if action not in {"reprimand_add", "warning_add", "warning_remove", "reprimand_remove"} or not target_id:
+        await state.clear()
+        await message.answer("Действие устарело. Откройте раздел дисциплины администрации заново.")
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_db() as db:
+        person = db.execute(
+            "SELECT name, position, warnings, reprimands FROM admins WHERE id = ? AND position != 'Владелец лиги'",
+            (target_id,)
+        ).fetchone()
+        if not person:
+            await state.clear()
+            await message.answer("Администратор не найден.")
+            return
+        warnings = int(person["warnings"] or 0)
+        reprimands = int(person["reprimands"] or 0)
+        log_action = action
+        if action == "warning_add":
+            warnings += 1
+            if warnings >= 3:
+                warnings = 0
+                reprimands += 1
+                log_action = "automatic_reprimand"
+                result = "Третье предупреждение достигнуто: предупреждения обнулены, автоматически выдан 1 выговор."
+            else:
+                result = f"Предупреждение выдано. Сейчас предупреждений: {warnings}/3."
+        elif action == "reprimand_add":
+            reprimands += 1
+            result = f"Выговор выдан. Всего выговоров: {reprimands}."
+        elif action == "warning_remove":
+            if warnings <= 0:
+                await state.clear()
+                await message.answer("У этого администратора нет предупреждений для снятия.")
+                return
+            warnings -= 1
+            result = f"Одно предупреждение снято. Осталось: {warnings}."
+        else:
+            if reprimands <= 0:
+                await state.clear()
+                await message.answer("У этого администратора нет выговоров для снятия.")
+                return
+            reprimands -= 1
+            result = f"Один выговор снят. Осталось: {reprimands}."
+        db.execute("UPDATE admins SET warnings = ?, reprimands = ? WHERE id = ?", (warnings, reprimands, target_id))
+        db.execute("""
+            INSERT INTO admin_discipline_log
+            (target_admin_id, target_name, target_position, action, reason, owner_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (target_id, person["name"], person["position"], log_action, reason, message.from_user.id, now))
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Дисциплина администрации обновлена</b>\n\n"
+        f"👤 Администратор: <b>{escape(person['name'])}</b>\n"
+        f"🛡 Должность: <b>{escape(person['position'])}</b>\n"
+        f"⚠️ Предупреждения: <b>{warnings}/3</b>\n"
+        f"❗ Выговоры: <b>{reprimands}</b>\n"
+        f"📝 Причина: {escape(reason)}\n\n{escape(result)}",
+        reply_markup=admin_discipline_keyboard(True)
+    )
+
+
+# =====================================================
 # АДМИН-ПАНЕЛЬ
 # =====================================================
 
@@ -977,6 +1192,7 @@ async def admin_panel(call: CallbackQuery):
     builder.button(text="➕ Добавить капитана", callback_data="add_captain")
     builder.button(text="➖ Снять капитана", callback_data="remove_captain")
     builder.button(text="⚖️ Дисциплина капитанов", callback_data="captain_discipline_admin")
+    builder.button(text="🛡 Дисциплина администрации", callback_data="admin_staff_table")
     builder.button(text="🎮 Добавить игру", callback_data="add_game")
     builder.button(text="🗑 Удалить игру", callback_data="delete_game")
     builder.button(text="📊 Добавить итоги", callback_data="add_result")
