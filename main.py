@@ -767,7 +767,7 @@ def captain_discipline_text():
             "SELECT name, team, warnings, reprimands FROM captains ORDER BY team COLLATE NOCASE"
         ).fetchall()
     if not rows:
-        return "📋 <b>ТАБЛИЦА КАПИТАНОВ MPHL</b>\\n\\nПока нет добавленных капитанов."
+        return "📋 <b>ТАБЛИЦА КАПИТАНОВ MPHL</b>\n\nПока нет добавленных капитанов."
     lines = [
         "📋 <b>ТАБЛИЦА КАПИТАНОВ MPHL</b>",
         "<i>Закрытая информация для капитанов и администрации</i>",
@@ -779,7 +779,7 @@ def captain_discipline_text():
         lines.append(f"⚠️ Предупреждения: <b>{int(row['warnings'] or 0)}/3</b>")
         lines.append(f"❗ Выговоры: <b>{int(row['reprimands'] or 0)}</b>")
         lines.append("━━━━━━━━━━━━━━")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 @dp.callback_query(F.data == "captain_discipline_table")
