@@ -145,6 +145,25 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        captain_columns = [row["name"] for row in db.execute("PRAGMA table_info(captains)").fetchall()]
+        if "telegram_id" not in captain_columns:
+            db.execute("ALTER TABLE captains ADD COLUMN telegram_id INTEGER")
+        if "warnings" not in captain_columns:
+            db.execute("ALTER TABLE captains ADD COLUMN warnings INTEGER NOT NULL DEFAULT 0")
+        if "reprimands" not in captain_columns:
+            db.execute("ALTER TABLE captains ADD COLUMN reprimands INTEGER NOT NULL DEFAULT 0")
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS captain_discipline_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captain_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                admin_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS suggestion_media_refs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,6 +260,31 @@ def is_admin(user_id: int, username: str | None = None):
     return False
 
 
+def telegram_username_from_link(link: str) -> str:
+    match = re.fullmatch(r"https?://t\\.me/([A-Za-z0-9_]+)", (link or "").strip(), flags=re.IGNORECASE)
+    return (match.group(1).lower() if match else "")
+
+
+def bind_captain_telegram_id(user_id: int, username: str | None):
+    """Привязывает Telegram ID к капитану по username из сохранённой ссылки."""
+    if not username:
+        return
+    normalized = username.lower().lstrip("@")
+    with get_db() as db:
+        rows = db.execute("SELECT id, telegram FROM captains").fetchall()
+        for row in rows:
+            if telegram_username_from_link(row["telegram"]) == normalized:
+                db.execute("UPDATE captains SET telegram_id = ? WHERE id = ?", (user_id, row["id"]))
+                break
+
+
+def is_captain(user_id: int) -> bool:
+    with get_db() as db:
+        return db.execute(
+            "SELECT 1 FROM captains WHERE telegram_id = ?", (user_id,)
+        ).fetchone() is not None
+
+
 def register_admin_user(user_id: int, username: str | None = None):
     if is_admin(user_id, username):
         with get_db() as db:
@@ -306,6 +350,8 @@ def main_menu_keyboard(user_id: int, username: str | None = None):
     builder.button(text="🎮 Игры", callback_data="games")
     builder.button(text="📊 Итоги игр", callback_data="results")
     builder.button(text="🏆 Таблица команд", callback_data="top_teams")
+    if is_admin(user_id, username) or is_captain(user_id):
+        builder.button(text="📋 Таблица капитанов", callback_data="captain_discipline_table")
     if is_admin(user_id, username):
         builder.button(text="⚙️ Админ-панель", callback_data="admin_panel")
     builder.adjust(2)
@@ -363,6 +409,10 @@ class AddCaptainForm(StatesGroup):
     waiting_for_team = State()
     waiting_for_telegram = State()
 
+class CaptainDisciplineForm(StatesGroup):
+    waiting_for_reason = State()
+
+
 class AddAdminForm(StatesGroup):
     waiting_for_level = State()
     waiting_for_position = State()
@@ -402,6 +452,7 @@ class TableEditForm(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     register_admin_user(message.from_user.id, message.from_user.username)
+    bind_captain_telegram_id(message.from_user.id, message.from_user.username)
     await show_main_menu(message)
 
 
@@ -707,6 +758,209 @@ async def admins_callback(call: CallbackQuery):
 
 
 # =====================================================
+# ЗАКРЫТАЯ ТАБЛИЦА КАПИТАНОВ И ДИСЦИПЛИНА
+# =====================================================
+
+def captain_discipline_text():
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT name, team, warnings, reprimands FROM captains ORDER BY team COLLATE NOCASE"
+        ).fetchall()
+    if not rows:
+        return "📋 <b>ТАБЛИЦА КАПИТАНОВ MPHL</b>\\n\\nПока нет добавленных капитанов."
+    lines = [
+        "📋 <b>ТАБЛИЦА КАПИТАНОВ MPHL</b>",
+        "<i>Закрытая информация для капитанов и администрации</i>",
+        ""
+    ]
+    for row in rows:
+        lines.append(f"🏒 <b>{escape(row['team'])}</b>")
+        lines.append(f"👤 Капитан: {escape(row['name'])}")
+        lines.append(f"⚠️ Предупреждения: <b>{int(row['warnings'] or 0)}/3</b>")
+        lines.append(f"❗ Выговоры: <b>{int(row['reprimands'] or 0)}</b>")
+        lines.append("━━━━━━━━━━━━━━")
+    return "\\n".join(lines)
+
+
+@dp.callback_query(F.data == "captain_discipline_table")
+async def captain_discipline_table(call: CallbackQuery):
+    if not (is_admin(call.from_user.id, call.from_user.username) or is_captain(call.from_user.id)):
+        await call.answer("Этот раздел доступен только капитанам и администрации.", show_alert=True)
+        return
+    await call.answer()
+    await call.message.edit_text(captain_discipline_text(), reply_markup=back_keyboard())
+
+
+def captain_discipline_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❗ Выдать выговор капитану", callback_data="captain_action:reprimand_add")],
+        [InlineKeyboardButton(text="⚠️ Выдать предупреждение капитану", callback_data="captain_action:warning_add")],
+        [InlineKeyboardButton(text="➖ Снять предупреждение капитану", callback_data="captain_action:warning_remove")],
+        [InlineKeyboardButton(text="➖ Снять выговор капитану", callback_data="captain_action:reprimand_remove")],
+        [InlineKeyboardButton(text="📋 Открыть таблицу капитанов", callback_data="captain_discipline_table")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_panel")]
+    ])
+
+
+@dp.callback_query(F.data.startswith("captain_action:"))
+async def captain_discipline_choose_action(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    allowed = {"reprimand_add", "warning_add", "warning_remove", "reprimand_remove"}
+    if action not in allowed:
+        await call.answer("Неизвестное действие.", show_alert=True)
+        return
+    with get_db() as db:
+        captains = db.execute("SELECT id, name, team FROM captains ORDER BY team COLLATE NOCASE").fetchall()
+    if not captains:
+        await call.answer("Список капитанов пуст.", show_alert=True)
+        return
+    labels = {
+        "reprimand_add": "выдать выговор",
+        "warning_add": "выдать предупреждение",
+        "warning_remove": "снять предупреждение",
+        "reprimand_remove": "снять выговор"
+    }
+    builder = InlineKeyboardBuilder()
+    for captain in captains:
+        builder.button(
+            text=f"{captain['name']} — {captain['team']}",
+            callback_data=f"captain_select:{action}:{captain['id']}"
+        )
+    builder.button(text="⬅️ Назад", callback_data="captain_discipline_admin")
+    builder.adjust(1)
+    await state.clear()
+    await call.answer()
+    await call.message.edit_text(
+        f"Выберите капитана, которому нужно {labels[action]}:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "captain_discipline_admin")
+async def captain_discipline_admin_menu(call: CallbackQuery):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    await call.answer()
+    await call.message.edit_text(
+        "⚖️ <b>ДИСЦИПЛИНА КАПИТАНОВ MPHL</b>\\n\\nВыберите действие:",
+        reply_markup=captain_discipline_admin_keyboard()
+    )
+
+
+@dp.callback_query(F.data.startswith("captain_select:"))
+async def captain_discipline_select(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id, call.from_user.username):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        _, action, raw_id = call.data.split(":")
+        captain_id = int(raw_id)
+    except (ValueError, IndexError):
+        await call.answer("Некорректный запрос.", show_alert=True)
+        return
+    with get_db() as db:
+        captain = db.execute("SELECT name, team FROM captains WHERE id = ?", (captain_id,)).fetchone()
+    if not captain:
+        await call.answer("Капитан не найден.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(captain_action=action, captain_id=captain_id)
+    await state.set_state(CaptainDisciplineForm.waiting_for_reason)
+    await call.answer()
+    await call.message.edit_text(
+        f"Вы выбрали: <b>{escape(captain['name'])}</b> — <b>{escape(captain['team'])}</b>.\\n\\n"
+        "Укажите причину действия (до 500 символов):",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(CaptainDisciplineForm.waiting_for_reason)
+async def captain_discipline_apply(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+    reason = (message.text or "").strip()
+    if not reason or len(reason) > 500:
+        await message.answer("Введите причину от 1 до 500 символов.", reply_markup=cancel_keyboard())
+        return
+    data = await state.get_data()
+    action = data.get("captain_action")
+    captain_id = data.get("captain_id")
+    action_names = {
+        "warning_add": "Предупреждение выдано",
+        "reprimand_add": "Выговор выдан",
+        "warning_remove": "Предупреждение снято",
+        "reprimand_remove": "Выговор снят"
+    }
+    if action not in action_names or not captain_id:
+        await state.clear()
+        await message.answer("Действие устарело. Откройте админ-панель заново.")
+        return
+
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_db() as db:
+        captain = db.execute("SELECT name, team, warnings, reprimands FROM captains WHERE id = ?", (captain_id,)).fetchone()
+        if not captain:
+            await state.clear()
+            await message.answer("Капитан не найден.")
+            return
+        warnings = int(captain["warnings"] or 0)
+        reprimands = int(captain["reprimands"] or 0)
+        log_action = action
+
+        if action == "warning_add":
+            warnings += 1
+            if warnings >= 3:
+                warnings = 0
+                reprimands += 1
+                log_action = "automatic_reprimand"
+                result = "⚠️ Третье предупреждение достигнуто: предупреждения обнулены, автоматически выдан 1 выговор."
+            else:
+                result = f"Предупреждение выдано. Сейчас предупреждений: {warnings}/3."
+        elif action == "reprimand_add":
+            reprimands += 1
+            result = f"Выговор выдан. Всего выговоров: {reprimands}."
+        elif action == "warning_remove":
+            if warnings <= 0:
+                await state.clear()
+                await message.answer("У этого капитана нет предупреждений для снятия.")
+                return
+            warnings -= 1
+            result = f"Одно предупреждение снято. Осталось: {warnings}."
+        else:
+            if reprimands <= 0:
+                await state.clear()
+                await message.answer("У этого капитана нет выговоров для снятия.")
+                return
+            reprimands -= 1
+            result = f"Один выговор снят. Осталось: {reprimands}."
+
+        db.execute(
+            "UPDATE captains SET warnings = ?, reprimands = ? WHERE id = ?",
+            (warnings, reprimands, captain_id)
+        )
+        db.execute("""
+            INSERT INTO captain_discipline_log (captain_id, action, reason, admin_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (captain_id, log_action, reason, message.from_user.id, now))
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>{action_names.get(action, 'Изменение выполнено')}</b>\\n\\n"
+        f"🏒 Команда: <b>{escape(captain['team'])}</b>\\n"
+        f"👤 Капитан: <b>{escape(captain['name'])}</b>\\n"
+        f"⚠️ Предупреждения: <b>{warnings}/3</b>\\n"
+        f"❗ Выговоры: <b>{reprimands}</b>\\n"
+        f"📝 Причина: {escape(reason)}\\n\\n{result}",
+        reply_markup=captain_discipline_admin_keyboard()
+    )
+
+
+# =====================================================
 # АДМИН-ПАНЕЛЬ
 # =====================================================
 
@@ -718,6 +972,7 @@ async def admin_panel(call: CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Добавить капитана", callback_data="add_captain")
     builder.button(text="➖ Снять капитана", callback_data="remove_captain")
+    builder.button(text="⚖️ Дисциплина капитанов", callback_data="captain_discipline_admin")
     builder.button(text="🎮 Добавить игру", callback_data="add_game")
     builder.button(text="🗑 Удалить игру", callback_data="delete_game")
     builder.button(text="📊 Добавить итоги", callback_data="add_result")
@@ -1470,6 +1725,7 @@ async def remove_captain_final(call: CallbackQuery):
         await call.answer("Некорректный запрос.", show_alert=True)
         return
     with get_db() as db:
+        db.execute("DELETE FROM captain_discipline_log WHERE captain_id = ?", (captain_id,))
         cursor = db.execute("DELETE FROM captains WHERE id = ?", (captain_id,))
     if cursor.rowcount == 0:
         await call.answer("Капитан уже удалён.", show_alert=True)
