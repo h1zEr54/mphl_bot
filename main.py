@@ -261,7 +261,7 @@ def is_admin(user_id: int, username: str | None = None):
 
 
 def telegram_username_from_link(link: str) -> str:
-    match = re.fullmatch(r"https?://t\\.me/([A-Za-z0-9_]+)", (link or "").strip(), flags=re.IGNORECASE)
+    match = re.fullmatch(r"https?://(?:www\.)?t\.me/([A-Za-z0-9_]+)/?", (link or "").strip(), flags=re.IGNORECASE)
     return (match.group(1).lower() if match else "")
 
 
@@ -302,6 +302,10 @@ def get_registered_admin_ids():
 
 def valid_telegram_link(link: str):
     return bool(re.fullmatch(r"https?://(t\.me|www\.twitch\.tv|twitch\.tv|youtube\.com|youtu\.be)/[A-Za-z0-9_/]+", link.strip()))
+
+
+def valid_telegram_profile_link(link: str):
+    return bool(re.fullmatch(r"https?://(?:www\.)?t\.me/[A-Za-z0-9_]+/?", (link or "").strip(), flags=re.IGNORECASE))
 
 
 def update_stats(match_name: str, winner: str, overtime: bool = False):
@@ -846,7 +850,7 @@ async def captain_discipline_admin_menu(call: CallbackQuery):
         return
     await call.answer()
     await call.message.edit_text(
-        "⚖️ <b>ДИСЦИПЛИНА КАПИТАНОВ MPHL</b>\\n\\nВыберите действие:",
+        "⚖️ <b>ДИСЦИПЛИНА КАПИТАНОВ MPHL</b>\n\nВыберите действие:",
         reply_markup=captain_discipline_admin_keyboard()
     )
 
@@ -872,7 +876,7 @@ async def captain_discipline_select(call: CallbackQuery, state: FSMContext):
     await state.set_state(CaptainDisciplineForm.waiting_for_reason)
     await call.answer()
     await call.message.edit_text(
-        f"Вы выбрали: <b>{escape(captain['name'])}</b> — <b>{escape(captain['team'])}</b>.\\n\\n"
+        f"Вы выбрали: <b>{escape(captain['name'])}</b> — <b>{escape(captain['team'])}</b>.\n\n"
         "Укажите причину действия (до 500 символов):",
         reply_markup=cancel_keyboard()
     )
@@ -950,12 +954,12 @@ async def captain_discipline_apply(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ <b>{action_names.get(action, 'Изменение выполнено')}</b>\\n\\n"
-        f"🏒 Команда: <b>{escape(captain['team'])}</b>\\n"
-        f"👤 Капитан: <b>{escape(captain['name'])}</b>\\n"
-        f"⚠️ Предупреждения: <b>{warnings}/3</b>\\n"
-        f"❗ Выговоры: <b>{reprimands}</b>\\n"
-        f"📝 Причина: {escape(reason)}\\n\\n{result}",
+        f"✅ <b>{action_names.get(action, 'Изменение выполнено')}</b>\n\n"
+        f"🏒 Команда: <b>{escape(captain['team'])}</b>\n"
+        f"👤 Капитан: <b>{escape(captain['name'])}</b>\n"
+        f"⚠️ Предупреждения: <b>{warnings}/3</b>\n"
+        f"❗ Выговоры: <b>{reprimands}</b>\n"
+        f"📝 Причина: {escape(reason)}\n\n{result}",
         reply_markup=captain_discipline_admin_keyboard()
     )
 
@@ -1615,7 +1619,7 @@ async def add_captain_telegram(message: Message, state: FSMContext):
         await state.clear()
         return
     telegram = (message.text or "").strip()
-    if not valid_telegram_link(telegram):
+    if not valid_telegram_profile_link(telegram):
         await message.answer("❌ Некорректная ссылка.\nИспользуйте формат https://t.me/username", reply_markup=cancel_keyboard())
         return
     data = await state.get_data()
