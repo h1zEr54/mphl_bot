@@ -996,11 +996,13 @@ def admin_discipline_text():
         ).fetchall()
     lines = [
         "📋 <b>ТАБЛИЦА АДМИНИСТРАЦИИ MPHL</b>",
-        "<i>Закрытая информация: только для администрации и владельца</i>",
-        ""
+        "<i>Доступ: администрация и владелец</i>",
+        "",
+        "<b>Предупреждения:</b> до 3, затем автоматически выдаётся выговор.",
+        "━━━━━━━━━━━━━━"
     ]
     if not rows:
-        return "\n".join(lines + ["Администраторы пока не добавлены."])
+        return "\n".join(lines + ["В списке администрации пока нет участников.", "Добавьте администраторов через «Управление администрацией»."])
     for row in rows:
         lines.append(f"🛡 <b>{escape(row['position'])}</b>")
         lines.append(f"👤 {escape(row['name'])}")
@@ -1192,7 +1194,7 @@ async def admin_panel(call: CallbackQuery):
     builder.button(text="➕ Добавить капитана", callback_data="add_captain")
     builder.button(text="➖ Снять капитана", callback_data="remove_captain")
     builder.button(text="⚖️ Дисциплина капитанов", callback_data="captain_discipline_admin")
-    builder.button(text="🛡 Дисциплина администрации", callback_data="admin_staff_table")
+    builder.button(text="📋 Таблица администрации и дисциплина", callback_data="admin_staff_table")
     builder.button(text="🎮 Добавить игру", callback_data="add_game")
     builder.button(text="🗑 Удалить игру", callback_data="delete_game")
     builder.button(text="📊 Добавить итоги", callback_data="add_result")
